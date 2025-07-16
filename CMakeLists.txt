@@ -38,4 +38,4 @@ set_target_properties(_core PROPERTIES
 
 
 # The install directory is the output (wheel) directory
-install(TARGETS _core flecs DESTINATION scikit_build_example)
+install(TARGETS _core flecs DESTINATION flecs)

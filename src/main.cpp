@@ -116,7 +116,7 @@ PYBIND11_MODULE(_core, m) {
 
         A simple Python interface to the Flecs Entity Component System.
 
-        .. currentmodule:: scikit_build_example
+        .. currentmodule:: flecs
 
         .. autosummary::
            :toctree: _generate

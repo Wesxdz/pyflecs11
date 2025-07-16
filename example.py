@@ -3,7 +3,7 @@
 Simple test of Flecs Python bindings
 """
 
-import scikit_build_example as flecs
+import flecs as flecs
 
 def test_basic_world():
     print("=== Testing Basic World Operations ===")

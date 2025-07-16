@@ -1,5 +1,5 @@
 package:
-  name: scikit_build_example
+  name: flecs
   version: 0.0.1
 
 source:
@@ -30,7 +30,7 @@ requirements:
 
 test:
   imports:
-    - scikit_build_example
+    - flecs
   requires:
     - pytest
   source_files:

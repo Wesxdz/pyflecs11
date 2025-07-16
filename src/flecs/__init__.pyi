@@ -2,7 +2,7 @@
 Pybind11 example plugin
 -----------------------
 
-.. currentmodule:: scikit_build_example
+.. currentmodule:: flecs
 
 .. autosummary::
     :toctree: _generate
