@@ -55,9 +55,10 @@ public:
     }
     
     // Add a tag (create tag entity if it doesn't exist, then add it)
-    void add_tag(const std::string& tag_name) {
+    PyEntity* add_tag(const std::string& tag_name) {
         flecs::entity tag = entity.world().entity(tag_name.c_str());
         entity.add(tag);
+        return this;
     }
     
     // Check if entity has a tag
@@ -74,18 +75,14 @@ public:
         }
     }
 
-    // Add a Python component to the entity
-    void add_component(py::object py_component_instance) {
+    PyEntity* set_component_instance(py::object py_component_instance) {
         py::object py_type = py::type::of(py_component_instance);
         std::string type_name = py::str(py_type.attr("__name__"));
-
         flecs::entity flecs_comp_id = entity.world().entity(type_name.c_str());
-        
-        // Log using py::print
         py::print("DEBUG (add_component): Adding component:", type_name, "with Flecs ID:", flecs_comp_id.id()); // New line
-        
         flecs_id_to_py_type_map[flecs_comp_id.id()] = py_type;
         entity.set<PyComponentWrapper>(flecs_comp_id, {py_component_instance});
+        return this;
     }
 
     // Get a Python component from the entity
@@ -213,10 +210,10 @@ PYBIND11_MODULE(_core, m) {
         .def("set_name", &PyEntity::set_name)
         .def("is_alive", &PyEntity::is_alive)
         .def("destroy", &PyEntity::destroy)
-        .def("add_tag", &PyEntity::add_tag)
         .def("has_tag", &PyEntity::has_tag)
         .def("remove_tag", &PyEntity::remove_tag)
-        .def("add", &PyEntity::add_component) // New add method for components
+        .def("add", &PyEntity::add_tag)
+        .def("set", &PyEntity::set_component_instance)
         .def("get", &PyEntity::get_component) // New get method for components
         .def("__repr__", [](const PyEntity& e) {
             return "Entity(id=" + std::to_string(e.id()) + ", name=\"" + e.name() + "\")";
