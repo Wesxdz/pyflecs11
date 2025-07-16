@@ -3,10 +3,37 @@
 Simple test of Flecs Python bindings
 """
 
-import flecs as flecs
+import flecs
+import numpy as np
+
+class Position:
+    x: int
+    y: int
+    matrix: np.array
+    test: list
+
+    def __init__(self, x: int = 0, y: int = 0):
+        self.x = x
+        self.y = y
+        self.matrix = np.zeros(10)
+        self.test = [1, "one", 1.0]
+
+    def __str__(self):
+        return f"Position({self.x}, {self.y}, {self.matrix}, {self.test})"
+    
+class Velocity:
+    x: int
+    y: int
+
+    def __init__(self, x: int = 0, y: int = 0):
+        self.x = x
+        self.y = y
+
+    def __str__(self):
+        return f"Velocity({self.x}, {self.y})"
+
 
 def test_basic_world():
-    print("=== Testing Basic World Operations ===")
     
     # Create a world
     world = flecs.World()
@@ -18,9 +45,22 @@ def test_basic_world():
     entity3 = world.entity("AnotherEntity")
 
     entity1.add_tag("wow")
+    entity2.add_tag("wow")
+    entity2.add_tag("dreamlike")
     print(entity1.has_tag("wow"))
     print(entity2.has_tag("wow"))
     
+    print("Add position")
+    pos = Position(1, 1)
+    entity1.add(pos)
+    
+    print("Get position")
+    print(type(pos).__name__)
+    print(entity1.get(Position))
+
+    ents = world.find_with_tags(["wow", "dreamlike"])
+    print(ents)
+
     print(f"Entity 1 (unnamed): {entity1}")
     print(f"Entity 2 (named): {entity2}")
     print(f"Entity 3 (named): {entity3}")
