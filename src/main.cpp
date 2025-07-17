@@ -13,8 +13,8 @@
 namespace py = pybind11;
 
 // Each (non-tag) component or relationship id on an entity is mapped to a py::object
+// This allows arbitrary Python classes/variables (such as neural networks) as components
 static std::map<flecs::id_t, std::map<flecs::id_t, py::object>> flecs_component_pyobject;
-
 
 // Simple wrapper for Flecs entity
 class PyEntity {
@@ -110,29 +110,82 @@ public:
     }
 };
 
-class PyQuery {
-    
+class PyQueryIterator {
+private:
+    flecs::world world;
+    ecs_query_t* query;
+    ecs_iter_t it;
+    std::vector<ecs_entity_t> component_ids;
+    bool next_archetype = true;
+    size_t i = 0;
+    size_t current = 0;
 public:
-    PyQuery(flecs::world& w, py::object comp_type) {
-        // Get the component type name
-        // component_name = py::str(comp_type.attr("__name__"));
-        
-        // Look up or create the component entity
-        // component_id = world.entity(component_name.c_str());
-        
-        // // Build the query - query for entities that have PyComponentWrapper 
-        // // with the specific component ID
-        // ecs_query_t *q = ecs_query(ecs, {
-        //     .terms = {
-        //         { .id = ecs_id(Position) },
-        //         { .id = ecs_id(ecs_pair(ecs_id(PyComponentWrapper), ecs_id(Position))), .inout = EcsIn}
-        //     },
+    PyQueryIterator(flecs::world& w, py::args args) : world(w) {
+        // Convert py::args to std::vector<py::object>
 
-        //     // QueryCache Auto automatically caches all terms that can be cached.
-        //     .cache_kind = EcsQueryCacheAuto
-        // });
+        for (auto arg : args) {
+            py::object comp_type = arg.cast<py::object>();
+            std::string component_name = py::str(comp_type.attr("__name__"));
+            ecs_entity_t component_id = world.entity(component_name.c_str());
+            component_ids.push_back(component_id);
+        }
+        ecs_query_desc_t desc = {};
+
+        for (size_t i = 0; i < component_ids.size() && i < 32; ++i) {
+            desc.terms[i] = {
+                .id = component_ids[i],
+                .inout = EcsInOut
+            };
+        }
+        // desc.term_count = terms.size();
+        
+        query = ecs_query_init(world, &desc);
+        it = ecs_query_iter(world, query);
+    }
+
+    PyQueryIterator& iter() {
+        return *this;
+    }
+        
+    py::list next() {
+        bool result = true;
+        if (next_archetype)
+        {
+            result = ecs_query_next(&it);
+            next_archetype = false;
+            i = 0;
+            current = it.count;
+        }
+        if (result)
+        {
+            ecs_entity_t source = it.entities[i];
+            py::list value;
+            
+            // Create a PyEntity from the flecs entity and append it
+            PyEntity py_entity(flecs::entity(world, source));
+            value.append(py_entity);
+            
+            // Append the component data
+            value.append(flecs_component_pyobject[source][component_ids[0]]);
+            
+            i++;
+            if (i == current)
+            {
+                next_archetype = true;
+            }
+            return value;
+        } else {
+            throw pybind11::stop_iteration();
+        }
+    }
+    
+    void reset() {
+        it = ecs_query_iter(world, query);
+        i = 0;
+        current = 0;
     }
 };
+
 
 // Simple wrapper for Flecs world
 class PyWorld {
@@ -203,8 +256,8 @@ public:
     }
 
     // Create a query for a specific component type
-    PyQuery query(py::object component_type) {
-        return PyQuery(world, component_type);
+    PyQueryIterator query(py::args args) {
+        return PyQueryIterator(world, args);
     }
 
 };
@@ -243,7 +296,11 @@ PYBIND11_MODULE(_core, m) {
         });
 
         // Bind PyQuery with iterator support
-    py::class_<PyQuery>(m, "Query");
+    py::class_<PyQueryIterator>(m, "Query")
+        .def("__iter__", &PyQueryIterator::iter, 
+             py::return_value_policy::reference_internal)
+        .def("__next__", &PyQueryIterator::next)
+        .def("reset", &PyQueryIterator::reset);
     
     // Bind PyWorld class
     py::class_<PyWorld>(m, "World")
@@ -259,20 +316,6 @@ PYBIND11_MODULE(_core, m) {
         .def("__repr__", [](const PyWorld& w) {
             return w.info();
         });
-
-    // Keep the original functions for backward compatibility
-    m.def("add", [](int i, int j) {
-        PyWorld world;
-        return i + j;
-    }, R"pbdoc(
-        Add two numbers (with Flecs world creation)
-    )pbdoc");
-
-    m.def("subtract", [](int i, int j) { 
-        return i - j; 
-    }, R"pbdoc(
-        Subtract two numbers
-    )pbdoc");
 
 #ifdef VERSION_INFO
     m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);

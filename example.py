@@ -12,17 +12,11 @@ def main():
     bob = ecs.entity("Bob").set(Position(10, 20)).add("Walking")
     bob.set(Position(20, 30))
     print(bob.get(Position))
-    alice = ecs.entity("Alice").set(Position(10, 20)).add("Walking")
+    alice = ecs.entity("Alice").set(Position(50, 25)).add("Walking")
     # print(alice.components)
-    # print("Okay")
-    # print(ecs.query(Position))
 
-    # for data in ecs.query(Position):
-    #     print("loop")
-    #     print(data)
-
-    # for ent, pos in ecs.query(Position):
-    #     print(f"{ent.name()}: {pos}")
+    for ent, pos in ecs.query(Position):
+        print(f"{ent.name()}: {pos}")
 
 if __name__ == "__main__":
     main()
