@@ -8,11 +8,10 @@ class Position:
 
 def main():
     ecs = flecs.World()
-    # bob = ecs.entity("Bob", [Position(10, 20), "Walking"])
-    bob = ecs.entity("Bob").set(Position(10, 20)).add("Walking")
+    bob = ecs.entity("Bob", [Position(10, 20), "Walking"])
     bob.set(Position(20, 30))
     print(bob.get(Position))
-    alice = ecs.entity("Alice").set(Position(50, 25)).add("Walking")
+    alice = ecs.entity("Alice", [Position(50, 25), "Walking"])
     # print(alice.components)
 
     for ent, pos in ecs.query(Position):

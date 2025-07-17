@@ -166,7 +166,10 @@ public:
             value.append(py_entity);
             
             // Append the component data
-            value.append(flecs_component_pyobject[source][component_ids[0]]);
+            for (size_t c = 0; c < component_ids.size(); c++)
+            {
+                value.append(flecs_component_pyobject[source][component_ids[c]]);
+            }
             
             i++;
             if (i == current)
@@ -198,6 +201,33 @@ public:
     // Create entity
     PyEntity entity() {
         return PyEntity(world.entity());
+    }
+
+    PyEntity entity(const std::string& name, const py::list& components_and_tags) {
+        PyEntity entity = PyEntity(world.entity(name.c_str()));
+        
+        // Process each item in the list
+        for (auto item : components_and_tags) {
+            try {
+                // Cast handle to object
+                py::object item_obj = item.cast<py::object>();
+                
+                // Check if it's a string (tag)
+                if (py::isinstance<py::str>(item_obj)) {
+                    std::string tag_name = py::str(item_obj);
+                    entity.add_tag(tag_name);
+                }
+                // Otherwise, treat it as a component instance
+                else {
+                    entity.set_component_instance(item_obj);
+                }
+            } catch (const std::exception& e) {
+                // Handle any errors during processing
+                py::print("Error processing component/tag:", e.what());
+            }
+        }
+        
+        return entity;
     }
     
     // Create named entity
@@ -307,6 +337,7 @@ PYBIND11_MODULE(_core, m) {
         .def(py::init<>())
         .def("entity", py::overload_cast<>(&PyWorld::entity))
         .def("entity", py::overload_cast<const std::string&>(&PyWorld::entity))
+        .def("entity", py::overload_cast<const std::string&, const py::list&>(&PyWorld::entity))
         .def("lookup", &PyWorld::lookup)
         .def("progress", &PyWorld::progress, py::arg("delta_time") = 0.0f)
         .def("info", &PyWorld::info)
