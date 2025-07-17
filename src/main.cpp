@@ -15,6 +15,7 @@ namespace py = pybind11;
 // Each (non-tag) component or relationship id on an entity is mapped to a py::object
 // This allows arbitrary Python classes/variables (such as neural networks) as components
 static std::map<flecs::id_t, std::map<flecs::id_t, py::object>> flecs_component_pyobject;
+static std::vector<py::object> observer_callbacks;
 
 // Simple wrapper for Flecs entity
 class PyEntity {
@@ -189,6 +190,48 @@ public:
     }
 };
 
+void PythonObserverCallback(ecs_iter_t *it) {
+    ecs_world_t *ecs = it->world;
+    ecs_entity_t event = it->event;
+    ecs_entity_t event_id = it->event_id;
+    
+    // Find the Python callback associated with this observer
+    // For simplicity, we'll store the callback index in the observer's context
+    size_t callback_index = reinterpret_cast<size_t>(it->ctx);
+    
+    if (callback_index < observer_callbacks.size()) {
+        py::object callback = observer_callbacks[callback_index];
+        
+        for (int i = 0; i < it->count; i++) {
+            ecs_entity_t entity_id = it->entities[i];
+            
+            // Create PyEntity wrapper
+            flecs::entity flecs_entity(ecs, entity_id);
+            PyEntity py_entity(flecs_entity);
+            
+            py::list args;
+            args.append(py_entity);
+            
+            // Add component data for each term in the observer query
+            for (int term_idx = 0; term_idx < it->field_count; term_idx++) {
+                ecs_entity_t comp_id = ecs_field_id(it, term_idx);
+                
+                if (flecs_component_pyobject[entity_id].count(comp_id)) {
+                    args.append(flecs_component_pyobject[entity_id][comp_id]);
+                }
+            }
+            
+            try {
+                // Call Python callback with entity and component data
+                callback(*args);
+            } catch (const std::exception& e) {
+                py::print("Error in observer callback:", e.what());
+            }
+        }
+    }
+}
+
+
 
 // Simple wrapper for Flecs world
 class PyWorld {
@@ -202,6 +245,51 @@ public:
     PyEntity entity() {
         return PyEntity(world.entity());
     }
+
+    ~PyWorld() {
+        observer_callbacks.clear();
+    }
+
+    void create_observer(py::function callback, py::args component_types, ecs_entity_t event = EcsOnAdd) {
+        // Store the callback
+        size_t callback_index = observer_callbacks.size();
+        observer_callbacks.push_back(callback);
+        
+        // Parse component types (reuse query parsing logic)
+        std::vector<ecs_entity_t> component_ids;
+        for (auto arg : component_types) {
+            py::object comp_type = arg.cast<py::object>();
+            std::string component_name = py::str(comp_type.attr("__name__"));
+            ecs_entity_t component_id = world.entity(component_name.c_str());
+            component_ids.push_back(component_id);
+        }
+        
+        // Build observer description
+        ecs_observer_desc_t desc = {};
+        desc.callback = PythonObserverCallback;
+        desc.ctx = reinterpret_cast<void*>(callback_index);
+        desc.events[0] = event;
+        
+        // Set up query terms (same as query logic)
+        for (size_t i = 0; i < component_ids.size() && i < 32; ++i) {
+            desc.query.terms[i] = {
+                .id = component_ids[i],
+                .inout = EcsInOut
+            };
+        }
+        
+        // Create the observer
+        ecs_observer_init(world, &desc);
+    }
+    
+    // Convenience method for decorator support
+    py::function observer_decorator(py::args component_types, ecs_entity_t event = EcsOnAdd) {
+        return py::cpp_function([this, component_types, event](py::function callback) {
+            this->create_observer(callback, component_types, event);
+            return callback;
+        });
+    }
+
 
     PyEntity entity(const std::string& name, const py::list& components_and_tags) {
         PyEntity entity = PyEntity(world.entity(name.c_str()));
@@ -308,6 +396,10 @@ PYBIND11_MODULE(_core, m) {
            PyWorld
            PyEntity
     )pbdoc";
+
+    m.attr("OnAdd") = EcsOnAdd;
+    m.attr("OnRemove") = EcsOnRemove;
+    m.attr("OnSet") = EcsOnSet;
     
     // Bind PyEntity class
     py::class_<PyEntity>(m, "Entity")
@@ -344,6 +436,7 @@ PYBIND11_MODULE(_core, m) {
         .def("find_with_tag", &PyWorld::find_with_tag)
         .def("find_with_tags", &PyWorld::find_with_tags)
         .def("query", &PyWorld::query)
+        .def("observer", &PyWorld::observer_decorator, py::arg("event") = EcsOnAdd)
         .def("__repr__", [](const PyWorld& w) {
             return w.info();
         });
