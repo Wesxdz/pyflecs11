@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <typeindex> // For std::type_index
 
 #define STRINGIFY(x) #x
@@ -11,14 +12,8 @@
 
 namespace py = pybind11;
 
-// Define a C++ component to hold a Python object
-struct PyComponentWrapper {
-    py::object obj;
-};
-
-// Global map to store Python type info (conceptually, a mapping from Flecs component ID to Python type)
-// This is a simplified approach. In a more robust system, you might register Python types with Flecs.
-static std::map<flecs::entity_t, py::object> flecs_id_to_py_type_map;
+// Each (non-tag) component or relationship id on an entity is mapped to a py::object
+static std::map<flecs::id_t, std::map<flecs::id_t, py::object>> flecs_component_pyobject;
 
 
 // Simple wrapper for Flecs entity
@@ -78,10 +73,16 @@ public:
     PyEntity* set_component_instance(py::object py_component_instance) {
         py::object py_type = py::type::of(py_component_instance);
         std::string type_name = py::str(py_type.attr("__name__"));
+        
+        // Get or create the component entity
         flecs::entity flecs_comp_id = entity.world().entity(type_name.c_str());
-        py::print("DEBUG (add_component): Adding component:", type_name, "with Flecs ID:", flecs_comp_id.id()); // New line
-        flecs_id_to_py_type_map[flecs_comp_id.id()] = py_type;
-        entity.set<PyComponentWrapper>(flecs_comp_id, {py_component_instance});
+        
+        // Store the Python object
+        flecs_component_pyobject[entity.id()][flecs_comp_id.id()] = py_component_instance;
+        
+        // Add the component using C API - use ecs_id() to get the component ID
+        ecs_add_id(entity.world(), entity.id(), flecs_comp_id.id());
+        
         return this;
     }
 
@@ -90,28 +91,46 @@ public:
         std::string type_name = py::str(py_component_type.attr("__name__"));
         
         // Log using py::print
-        py::print("DEBUG (get_component): Attempting to get component:", type_name); // New line
+        py::print("DEBUG (get_component): Attempting to get component:", type_name);
 
         flecs::entity flecs_comp_id = entity.world().lookup(type_name.c_str());
 
         if (!flecs_comp_id.is_valid()) {
-            py::print("DEBUG (get_component): Flecs ID for", type_name, "is NOT valid."); // New line
+            py::print("DEBUG (get_component): Flecs ID for", type_name, "is NOT valid.");
             return py::none();
         }
-        py::print("DEBUG (get_component): Flecs ID for", type_name, "is valid. ID:", flecs_comp_id.id()); // New line
+        py::print("DEBUG (get_component): Flecs ID for", type_name, "is valid. ID:", flecs_comp_id.id()); 
 
-        if (entity.has<PyComponentWrapper>(flecs_comp_id)) {
-            py::print("DEBUG (get_component): Entity HAS component", type_name); // New line
-            const PyComponentWrapper& wrapper = entity.get<PyComponentWrapper>(flecs_comp_id);
-            if (wrapper.obj.is_none()) {
-                py::print("DEBUG (get_component): Retrieved Python object is None."); // New line
-            } else {
-                py::print("DEBUG (get_component): Successfully retrieved Python object."); // New line
-            }
-            return wrapper.obj;
+        if (flecs_component_pyobject[entity].count(flecs_comp_id)) {
+            py::print("DEBUG (get_component): Entity HAS component", type_name);
+            return flecs_component_pyobject[entity][flecs_comp_id];
         }
-        py::print("DEBUG (get_component): Entity DOES NOT HAVE component", type_name); // New line
+        py::print("DEBUG (get_component): Entity DOES NOT HAVE component", type_name);
         return py::none();
+    }
+};
+
+class PyQuery {
+    
+public:
+    PyQuery(flecs::world& w, py::object comp_type) {
+        // Get the component type name
+        // component_name = py::str(comp_type.attr("__name__"));
+        
+        // Look up or create the component entity
+        // component_id = world.entity(component_name.c_str());
+        
+        // // Build the query - query for entities that have PyComponentWrapper 
+        // // with the specific component ID
+        // ecs_query_t *q = ecs_query(ecs, {
+        //     .terms = {
+        //         { .id = ecs_id(Position) },
+        //         { .id = ecs_id(ecs_pair(ecs_id(PyComponentWrapper), ecs_id(Position))), .inout = EcsIn}
+        //     },
+
+        //     // QueryCache Auto automatically caches all terms that can be cached.
+        //     .cache_kind = EcsQueryCacheAuto
+        // });
     }
 };
 
@@ -121,8 +140,6 @@ public:
     flecs::world world;
     
     PyWorld() {
-        // Register the PyComponentWrapper with Flecs
-        world.component<PyComponentWrapper>();
     }
     
     // Create entity
@@ -184,6 +201,12 @@ public:
 
         return entities;
     }
+
+    // Create a query for a specific component type
+    PyQuery query(py::object component_type) {
+        return PyQuery(world, component_type);
+    }
+
 };
 
 
@@ -218,6 +241,9 @@ PYBIND11_MODULE(_core, m) {
         .def("__repr__", [](const PyEntity& e) {
             return "Entity(id=" + std::to_string(e.id()) + ", name=\"" + e.name() + "\")";
         });
+
+        // Bind PyQuery with iterator support
+    py::class_<PyQuery>(m, "Query");
     
     // Bind PyWorld class
     py::class_<PyWorld>(m, "World")
@@ -229,6 +255,7 @@ PYBIND11_MODULE(_core, m) {
         .def("info", &PyWorld::info)
         .def("find_with_tag", &PyWorld::find_with_tag)
         .def("find_with_tags", &PyWorld::find_with_tags)
+        .def("query", &PyWorld::query)
         .def("__repr__", [](const PyWorld& w) {
             return w.info();
         });

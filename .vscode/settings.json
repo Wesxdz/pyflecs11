@@ -78,6 +78,7 @@
         "variant": "cpp",
         "format": "cpp",
         "stdfloat": "cpp",
-        "__nullptr": "cpp"
+        "__nullptr": "cpp",
+        "__tree": "cpp"
     }
 }
