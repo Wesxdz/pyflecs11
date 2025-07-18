@@ -92,21 +92,21 @@ public:
         std::string type_name = py::str(py_component_type.attr("__name__"));
         
         // Log using py::print
-        py::print("DEBUG (get_component): Attempting to get component:", type_name);
+        // py::print("DEBUG (get_component): Attempting to get component:", type_name);
 
         flecs::entity flecs_comp_id = entity.world().lookup(type_name.c_str());
 
         if (!flecs_comp_id.is_valid()) {
-            py::print("DEBUG (get_component): Flecs ID for", type_name, "is NOT valid.");
+            // py::print("DEBUG (get_component): Flecs ID for", type_name, "is NOT valid.");
             return py::none();
         }
-        py::print("DEBUG (get_component): Flecs ID for", type_name, "is valid. ID:", flecs_comp_id.id()); 
+        // py::print("DEBUG (get_component): Flecs ID for", type_name, "is valid. ID:", flecs_comp_id.id()); 
 
         if (flecs_component_pyobject[entity].count(flecs_comp_id)) {
-            py::print("DEBUG (get_component): Entity HAS component", type_name);
+            // py::print("DEBUG (get_component): Entity HAS component", type_name);
             return flecs_component_pyobject[entity][flecs_comp_id];
         }
-        py::print("DEBUG (get_component): Entity DOES NOT HAVE component", type_name);
+        // py::print("DEBUG (get_component): Entity DOES NOT HAVE component", type_name);
         return py::none();
     }
 };
@@ -117,6 +117,8 @@ private:
     ecs_query_t* query;
     ecs_iter_t it;
     std::vector<ecs_entity_t> component_ids;
+    std::vector<bool> tag_indices;
+    int non_tag_component_count = 0;
     bool next_archetype = true;
     size_t i = 0;
     size_t current = 0;
@@ -126,7 +128,15 @@ public:
 
         for (auto arg : args) {
             py::object comp_type = arg.cast<py::object>();
-            std::string component_name = py::str(comp_type.attr("__name__"));
+            std::string component_name;
+            if (py::isinstance<py::str>(comp_type)) { // Tags are strings
+                component_name = comp_type.cast<std::string>();
+                tag_indices.push_back(true);
+            } else {
+                component_name = py::str(comp_type.attr("__name__"));
+                tag_indices.push_back(false);
+                non_tag_component_count++;
+            }
             ecs_entity_t component_id = world.entity(component_name.c_str());
             component_ids.push_back(component_id);
         }
@@ -167,8 +177,9 @@ public:
             value.append(py_entity);
             
             // Append the component data
-            for (size_t c = 0; c < component_ids.size(); c++)
+            for (size_t c = 0; c < non_tag_component_count; c++)
             {
+                for (;tag_indices[c] && c < non_tag_component_count;c++) {}
                 value.append(flecs_component_pyobject[source][component_ids[c]]);
             }
             

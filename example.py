@@ -19,9 +19,11 @@ def main():
     alice = ecs.entity("Alice", [Position(50, 25), "Walking"])
     # print(alice.components)
 
-    for ent, pos in ecs.query(Position):
+    for ent, pos in ecs.query(Position, "Walking"):
         print(f"{ent.name()}: {pos}")
 
 
 if __name__ == "__main__":
     main()
+
+
