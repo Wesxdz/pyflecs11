@@ -16,6 +16,7 @@ namespace py = pybind11;
 // This allows arbitrary Python classes/variables (such as neural networks) as components
 static std::map<flecs::id_t, std::map<flecs::id_t, py::object>> flecs_component_pyobject;
 static std::vector<py::object> observer_callbacks;
+static std::vector<py::object> system_callbacks;
 
 class PyEntity {
 public:
@@ -371,32 +372,6 @@ public:
         return targets;
     }
     
-    // Get all entities that have this entity as a target for a given relation (string)
-    std::vector<PyEntity> get_sources(const std::string& relation_name) {
-        std::vector<PyEntity> sources;
-        
-        entity.each(flecs::Wildcard, pears, [&sources](flecs::id id) {
-            sources.push_back(id)
-        }
-    });
-        
-        return targets;
-    }
-    
-    // Get all entities that have this entity as a target for a given relation (entity)
-    std::vector<PyEntity> get_sources(PyEntity& relation) {
-        std::vector<PyEntity> sources;
-        
-        entity.world().query_builder()
-            .with(relation.entity, entity)
-            .build()
-            .each([&sources](flecs::entity source) {
-                sources.push_back(PyEntity(source));
-            });
-        
-        return sources;
-    }
-    
     // Get the component data for a relationship pair
     py::object get_relationship_component(const std::string& relation_name, const std::string& target_name) {
         flecs::entity relation = entity.world().lookup(relation_name.c_str());
@@ -685,7 +660,42 @@ void PythonObserverCallback(ecs_iter_t *it) {
     }
 }
 
-
+void PythonSystemCallback(ecs_iter_t *it) {
+    ecs_world_t *ecs = it->world;
+    
+    size_t callback_index = reinterpret_cast<size_t>(it->ctx);
+    
+    if (callback_index < system_callbacks.size()) {
+        py::object callback = system_callbacks[callback_index];
+        
+        for (int i = 0; i < it->count; i++) {
+            ecs_entity_t entity_id = it->entities[i];
+            
+            // Create PyEntity wrapper
+            flecs::entity flecs_entity(ecs, entity_id);
+            PyEntity py_entity(flecs_entity);
+            
+            py::list args;
+            args.append(py_entity);
+            
+            for (int term_idx = 0; term_idx < it->field_count; term_idx++) {
+                ecs_entity_t comp_id = ecs_field_id(it, term_idx);
+                
+                if (flecs_component_pyobject[entity_id].count(comp_id)) {
+                    py::object& stored_component = flecs_component_pyobject[entity_id][comp_id];
+                    args.append(stored_component);
+                }
+            }
+            
+            try {
+                // Call Python callback with entity and component references
+                callback(*args);
+            } catch (const std::exception& e) {
+                py::print("Error in system callback:", e.what());
+            }
+        }
+    }
+}
 
 // Simple wrapper for Flecs world
 class PyWorld {
@@ -702,6 +712,7 @@ public:
 
     ~PyWorld() {
         observer_callbacks.clear();
+        system_callbacks.clear();
     }
 
     void create_observer(py::function callback, py::args component_types, ecs_entity_t event = EcsOnAdd) {
@@ -735,7 +746,61 @@ public:
         // Create the observer
         ecs_observer_init(world, &desc);
     }
-    
+
+    void create_system(py::function callback, py::args component_types) {
+        py::print("Creating system with", component_types.size(), "components");
+        
+        // Store the callback
+        size_t callback_index = system_callbacks.size();
+        system_callbacks.push_back(callback);
+        
+        // Parse component types
+        std::vector<ecs_entity_t> component_ids;
+        for (auto arg : component_types) {
+            py::object comp_type = arg.cast<py::object>();
+            std::string component_name = py::str(comp_type.attr("__name__"));
+            py::print("  Component:", component_name);
+            ecs_entity_t component_id = world.entity(component_name.c_str()).id();
+            component_ids.push_back(component_id);
+        }
+        
+        // CRITICAL FIX: Create the system entity first with proper phase setup
+        ecs_entity_t system_entity = ecs_new(world);
+        ecs_add_pair(world, system_entity, EcsDependsOn, EcsOnUpdate);
+        ecs_add_id(world, system_entity, EcsOnUpdate);
+        
+        ecs_system_desc_t desc = {};
+        desc.entity = system_entity;  // Assign the pre-created entity
+        desc.callback = PythonSystemCallback;
+        desc.ctx = reinterpret_cast<void*>(callback_index);
+        
+        // Set up query terms
+        for (size_t i = 0; i < component_ids.size() && i < 32; ++i) {
+            desc.query.terms[i] = {
+                .id = component_ids[i],
+                .inout = EcsInOut,
+                .oper = EcsAnd
+            };
+        }
+        
+        // Initialize the system with the pre-configured entity
+        ecs_entity_t result = ecs_system_init(world, &desc);
+        if (result == 0) {
+            py::print("ERROR: Failed to create system!");
+            return;
+        }
+        
+        py::print("System created with ID:", result);
+        
+        // Verify the system setup
+        if (ecs_has_pair(world, result, EcsDependsOn, EcsOnUpdate)) {
+            py::print("✓ System properly depends on OnUpdate");
+        }
+        if (ecs_has_id(world, result, EcsOnUpdate)) {
+            py::print("✓ System is in OnUpdate phase");
+        }
+    }
+        
     // Convenience method for decorator support
     py::function observer_decorator(py::args component_types, ecs_entity_t event = EcsOnAdd) {
         return py::cpp_function([this, component_types, event](py::function callback) {
@@ -744,6 +809,12 @@ public:
         });
     }
 
+    py::function system_decorator(py::args component_types) {
+        return py::cpp_function([this, component_types](py::function callback) {
+            this->create_system(callback, component_types);
+            return callback;
+        });
+    }
 
     PyEntity entity(const std::string& name, const py::list& components_and_tags) {
         PyEntity entity = PyEntity(world.entity(name.c_str()));
@@ -896,8 +967,6 @@ PYBIND11_MODULE(_core, m) {
         // Relationship traversal methods
         .def("get_targets", py::overload_cast<const std::string&>(&PyEntity::get_targets))
         .def("get_targets", py::overload_cast<PyEntity&>(&PyEntity::get_targets))
-        .def("get_sources", py::overload_cast<const std::string&>(&PyEntity::get_sources))
-        .def("get_sources", py::overload_cast<PyEntity&>(&PyEntity::get_sources))
         // Component methods
         .def("set", &PyEntity::set_component_instance)
         .def("get", &PyEntity::get_component)
@@ -925,6 +994,7 @@ PYBIND11_MODULE(_core, m) {
         .def("find_with_tags", &PyWorld::find_with_tags)
         .def("query", &PyWorld::query)
         .def("observer", &PyWorld::observer_decorator, py::arg("event") = EcsOnAdd)
+        .def("system", &PyWorld::system_decorator)
         .def("__repr__", [](const PyWorld& w) {
             return w.info();
         });
