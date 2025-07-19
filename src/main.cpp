@@ -17,7 +17,6 @@ namespace py = pybind11;
 static std::map<flecs::id_t, std::map<flecs::id_t, py::object>> flecs_component_pyobject;
 static std::vector<py::object> observer_callbacks;
 
-// Simple wrapper for Flecs entity
 class PyEntity {
 public:
     flecs::entity entity;
@@ -33,6 +32,18 @@ public:
     std::string name() const { 
         const char* name = entity.name();
         return name ? std::string(name) : "";
+    }
+
+    std::string path() {
+        return entity.path().c_str();
+    }
+
+    std::vector<PyEntity> children() {
+        std::vector<PyEntity> children_vec;
+        entity.children([&](flecs::entity child) {
+            children_vec.push_back(PyEntity(child));
+        });
+        return children_vec; 
     }
     
     // Set entity name
@@ -57,10 +68,223 @@ public:
         return this;
     }
     
+    // Add a relationship (relation, target) - both as strings
+    PyEntity* add_relationship(const std::string& relation_name, const std::string& target_name) {
+        flecs::entity relation = entity.world().entity(relation_name.c_str());
+        flecs::entity target = entity.world().entity(target_name.c_str());
+        entity.add(relation, target);
+        return this;
+    }
+    
+    // Add a relationship (relation, target) - relation as string, target as entity
+    PyEntity* add_relationship(const std::string& relation_name, PyEntity& target) {
+        flecs::entity relation = entity.world().entity(relation_name.c_str());
+        entity.add(relation, target.entity);
+        return this;
+    }
+    
+    // Add a relationship (relation, target) - both as entities
+    PyEntity* add_relationship(PyEntity& relation, PyEntity& target) {
+        entity.add(relation.entity, target.entity);
+        return this;
+    }
+    
+    // Add a relationship (relation, target) - relation as entity, target as string
+    PyEntity* add_relationship(PyEntity& relation, const std::string& target_name) {
+        flecs::entity target = entity.world().entity(target_name.c_str());
+        entity.add(relation.entity, target);
+        return this;
+    }
+    
+    // Add a relationship with Python component as target
+    PyEntity* add_relationship(const std::string& relation_name, py::object py_component_instance) {
+        flecs::entity relation = entity.world().entity(relation_name.c_str());
+        
+        // Get the component type name
+        py::object py_type = py::type::of(py_component_instance);
+        std::string component_type_name = py::str(py_type.attr("__name__"));
+        
+        // Get or create the component entity
+        flecs::entity component_entity = entity.world().entity(component_type_name.c_str());
+        
+        // Store the Python object
+        flecs_component_pyobject[entity.id()][component_entity.id()] = py_component_instance;
+        
+        // Add the relationship
+        entity.add(relation, component_entity);
+        
+        return this;
+    }
+    
+    // Add a relationship with Python component as relation
+    PyEntity* add_relationship(py::object py_component_instance, const std::string& target_name) {
+        py::object py_type = py::type::of(py_component_instance);
+        std::string component_type_name = py::str(py_type.attr("__name__"));
+        
+        flecs::entity component_entity = entity.world().entity(component_type_name.c_str());
+        flecs::entity target = entity.world().entity(target_name.c_str());
+        
+        // Store the Python object
+        flecs_component_pyobject[entity.id()][component_entity.id()] = py_component_instance;
+        
+        entity.add(component_entity, target);
+        
+        return this;
+    }
+    
+    // Add a relationship with Python component as both relation and target
+    PyEntity* add_relationship(py::object py_relation_instance, py::object py_target_instance) {
+        py::object py_rel_type = py::type::of(py_relation_instance);
+        py::object py_tgt_type = py::type::of(py_target_instance);
+        
+        std::string rel_type_name = py::str(py_rel_type.attr("__name__"));
+        std::string tgt_type_name = py::str(py_tgt_type.attr("__name__"));
+        
+        flecs::entity rel_entity = entity.world().entity(rel_type_name.c_str());
+        flecs::entity tgt_entity = entity.world().entity(tgt_type_name.c_str());
+        
+        // Store the Python objects
+        flecs_component_pyobject[entity.id()][rel_entity.id()] = py_relation_instance;
+        flecs_component_pyobject[entity.id()][tgt_entity.id()] = py_target_instance;
+        
+        entity.add(rel_entity, tgt_entity);
+        
+        return this;
+    }
+    
+    // Overloaded add method that handles tags, relationships, and components
+    PyEntity* add(const std::string& tag_or_relation_name) {
+        // Single argument - treat as tag
+        return add_tag(tag_or_relation_name);
+    }
+    
+    PyEntity* add(const std::string& relation_name, const std::string& target_name) {
+        // Two string arguments - treat as relationship
+        return add_relationship(relation_name, target_name);
+    }
+    
+    PyEntity* add(const std::string& relation_name, PyEntity& target) {
+        // String relation, entity target
+        return add_relationship(relation_name, target);
+    }
+    
+    PyEntity* add(PyEntity& relation, PyEntity& target) {
+        // Entity relation, entity target
+        return add_relationship(relation, target);
+    }
+    
+    PyEntity* add(PyEntity& relation, const std::string& target_name) {
+        // Entity relation, string target
+        return add_relationship(relation, target_name);
+    }
+    
+    PyEntity* add(const std::string& relation_name, py::object py_component_instance) {
+        // String relation, component target
+        return add_relationship(relation_name, py_component_instance);
+    }
+    
+    PyEntity* add(py::object py_component_instance, const std::string& target_name) {
+        // Component relation, string target
+        return add_relationship(py_component_instance, target_name);
+    }
+    
+    PyEntity* add(py::object py_relation_instance, py::object py_target_instance) {
+        // Component relation, component target
+        return add_relationship(py_relation_instance, py_target_instance);
+    }
+
+    PyEntity* child_of(PyEntity& parent)
+    {
+        entity.child_of(parent.entity);
+        return this;
+    }
+    
     // Check if entity has a tag
     bool has_tag(const std::string& tag_name) {
         flecs::entity tag = entity.world().lookup(tag_name.c_str());
         return tag.is_valid() && entity.has(tag);
+    }
+    
+    // Check if entity has a relationship (string, string)
+    bool has_relationship(const std::string& relation_name, const std::string& target_name) {
+        flecs::entity relation = entity.world().lookup(relation_name.c_str());
+        flecs::entity target = entity.world().lookup(target_name.c_str());
+        return relation.is_valid() && target.is_valid() && entity.has(relation, target);
+    }
+    
+    // Check if entity has a relationship (string, entity)
+    bool has_relationship(const std::string& relation_name, PyEntity& target) {
+        flecs::entity relation = entity.world().lookup(relation_name.c_str());
+        return relation.is_valid() && entity.has(relation, target.entity);
+    }
+    
+    // Check if entity has a relationship (entity, entity)
+    bool has_relationship(PyEntity& relation, PyEntity& target) {
+        return entity.has(relation.entity, target.entity);
+    }
+    
+    // Check if entity has a relationship (entity, string)
+    bool has_relationship(PyEntity& relation, const std::string& target_name) {
+        flecs::entity target = entity.world().lookup(target_name.c_str());
+        return target.is_valid() && entity.has(relation.entity, target);
+    }
+    
+    // Check if entity has a relationship with component (string, component)
+    bool has_relationship(const std::string& relation_name, py::object py_component_type) {
+        flecs::entity relation = entity.world().lookup(relation_name.c_str());
+        std::string component_type_name = py::str(py_component_type.attr("__name__"));
+        flecs::entity component_entity = entity.world().lookup(component_type_name.c_str());
+        return relation.is_valid() && component_entity.is_valid() && entity.has(relation, component_entity);
+    }
+    
+    // Check if entity has a relationship with component (component, string)
+    bool has_relationship(py::object py_component_type, const std::string& target_name) {
+        std::string component_type_name = py::str(py_component_type.attr("__name__"));
+        flecs::entity component_entity = entity.world().lookup(component_type_name.c_str());
+        flecs::entity target = entity.world().lookup(target_name.c_str());
+        return component_entity.is_valid() && target.is_valid() && entity.has(component_entity, target);
+    }
+    
+    // Check if entity has a relationship with components (component, component)
+    bool has_relationship(py::object py_relation_type, py::object py_target_type) {
+        std::string rel_type_name = py::str(py_relation_type.attr("__name__"));
+        std::string tgt_type_name = py::str(py_target_type.attr("__name__"));
+        flecs::entity rel_entity = entity.world().lookup(rel_type_name.c_str());
+        flecs::entity tgt_entity = entity.world().lookup(tgt_type_name.c_str());
+        return rel_entity.is_valid() && tgt_entity.is_valid() && entity.has(rel_entity, tgt_entity);
+    }
+    
+    // Overloaded has method
+    bool has(const std::string& tag_or_relation_name) {
+        return has_tag(tag_or_relation_name);
+    }
+    
+    bool has(const std::string& relation_name, const std::string& target_name) {
+        return has_relationship(relation_name, target_name);
+    }
+    
+    bool has(const std::string& relation_name, PyEntity& target) {
+        return has_relationship(relation_name, target);
+    }
+    
+    bool has(PyEntity& relation, PyEntity& target) {
+        return has_relationship(relation, target);
+    }
+    
+    bool has(PyEntity& relation, const std::string& target_name) {
+        return has_relationship(relation, target_name);
+    }
+    
+    bool has(const std::string& relation_name, py::object py_component_type) {
+        return has_relationship(relation_name, py_component_type);
+    }
+    
+    bool has(py::object py_component_type, const std::string& target_name) {
+        return has_relationship(py_component_type, target_name);
+    }
+    
+    bool has(py::object py_relation_type, py::object py_target_type) {
+        return has_relationship(py_relation_type, py_target_type);
     }
     
     // Remove a tag
@@ -69,6 +293,124 @@ public:
         if (tag.is_valid()) {
             entity.remove(tag);
         }
+    }
+    
+    // Remove a relationship (string, string)
+    void remove_relationship(const std::string& relation_name, const std::string& target_name) {
+        flecs::entity relation = entity.world().lookup(relation_name.c_str());
+        flecs::entity target = entity.world().lookup(target_name.c_str());
+        if (relation.is_valid() && target.is_valid()) {
+            entity.remove(relation, target);
+        }
+    }
+    
+    // Remove a relationship (string, entity)
+    void remove_relationship(const std::string& relation_name, PyEntity& target) {
+        flecs::entity relation = entity.world().lookup(relation_name.c_str());
+        if (relation.is_valid()) {
+            entity.remove(relation, target.entity);
+        }
+    }
+    
+    // Remove a relationship (entity, entity)
+    void remove_relationship(PyEntity& relation, PyEntity& target) {
+        entity.remove(relation.entity, target.entity);
+    }
+    
+    // Remove a relationship (entity, string)
+    void remove_relationship(PyEntity& relation, const std::string& target_name) {
+        flecs::entity target = entity.world().lookup(target_name.c_str());
+        if (target.is_valid()) {
+            entity.remove(relation.entity, target);
+        }
+    }
+    
+    // Overloaded remove method
+    void remove(const std::string& tag_or_relation_name) {
+        remove_tag(tag_or_relation_name);
+    }
+    
+    void remove(const std::string& relation_name, const std::string& target_name) {
+        remove_relationship(relation_name, target_name);
+    }
+    
+    void remove(const std::string& relation_name, PyEntity& target) {
+        remove_relationship(relation_name, target);
+    }
+    
+    void remove(PyEntity& relation, PyEntity& target) {
+        remove_relationship(relation, target);
+    }
+    
+    void remove(PyEntity& relation, const std::string& target_name) {
+        remove_relationship(relation, target_name);
+    }
+    
+    // Get all targets for a given relation (string)
+    std::vector<PyEntity> get_targets(const std::string& relation_name) {
+        std::vector<PyEntity> targets;
+        flecs::entity relation = entity.world().lookup(relation_name.c_str());
+        
+        if (relation.is_valid()) {
+            entity.each(relation, [&targets](flecs::entity target) {
+                targets.push_back(PyEntity(target));
+            });
+        }
+        
+        return targets;
+    }
+    
+    // Get all targets for a given relation (entity)
+    std::vector<PyEntity> get_targets(PyEntity& relation) {
+        std::vector<PyEntity> targets;
+        
+        entity.each(relation.entity, [&targets](flecs::entity target) {
+            targets.push_back(PyEntity(target));
+        });
+        
+        return targets;
+    }
+    
+    // Get all entities that have this entity as a target for a given relation (string)
+    std::vector<PyEntity> get_sources(const std::string& relation_name) {
+        std::vector<PyEntity> sources;
+        
+        entity.each(flecs::Wildcard, pears, [&sources](flecs::id id) {
+            sources.push_back(id)
+        }
+    });
+        
+        return targets;
+    }
+    
+    // Get all entities that have this entity as a target for a given relation (entity)
+    std::vector<PyEntity> get_sources(PyEntity& relation) {
+        std::vector<PyEntity> sources;
+        
+        entity.world().query_builder()
+            .with(relation.entity, entity)
+            .build()
+            .each([&sources](flecs::entity source) {
+                sources.push_back(PyEntity(source));
+            });
+        
+        return sources;
+    }
+    
+    // Get the component data for a relationship pair
+    py::object get_relationship_component(const std::string& relation_name, const std::string& target_name) {
+        flecs::entity relation = entity.world().lookup(relation_name.c_str());
+        flecs::entity target = entity.world().lookup(target_name.c_str());
+        
+        if (relation.is_valid() && target.is_valid()) {
+            // Try to get component data stored for this relationship pair
+            auto pair_id = ecs_pair(relation.id(), target.id());
+            if (flecs_component_pyobject[entity.id()].count(pair_id)) {
+                return flecs_component_pyobject[entity.id()][pair_id];
+            }
+        }
+        
+        return py::none();
     }
 
     PyEntity* set_component_instance(py::object py_component_instance) {
@@ -91,22 +433,15 @@ public:
     py::object get_component(py::object py_component_type) {
         std::string type_name = py::str(py_component_type.attr("__name__"));
         
-        // Log using py::print
-        // py::print("DEBUG (get_component): Attempting to get component:", type_name);
-
         flecs::entity flecs_comp_id = entity.world().lookup(type_name.c_str());
 
         if (!flecs_comp_id.is_valid()) {
-            // py::print("DEBUG (get_component): Flecs ID for", type_name, "is NOT valid.");
             return py::none();
         }
-        // py::print("DEBUG (get_component): Flecs ID for", type_name, "is valid. ID:", flecs_comp_id.id()); 
 
-        if (flecs_component_pyobject[entity].count(flecs_comp_id)) {
-            // py::print("DEBUG (get_component): Entity HAS component", type_name);
-            return flecs_component_pyobject[entity][flecs_comp_id];
+        if (flecs_component_pyobject[entity.id()].count(flecs_comp_id.id())) {
+            return flecs_component_pyobject[entity.id()][flecs_comp_id.id()];
         }
-        // py::print("DEBUG (get_component): Entity DOES NOT HAVE component", type_name);
         return py::none();
     }
 };
@@ -116,59 +451,128 @@ private:
     flecs::world world;
     ecs_query_t* query;
     ecs_iter_t it;
-    std::vector<ecs_entity_t> component_ids;
-    std::vector<bool> tag_indices;
+    
+    struct QueryTerm {
+        ecs_entity_t id;
+        bool is_relationship = false;
+        bool is_wildcard_target = false;
+        bool is_wildcard_relation = false;
+        ecs_entity_t relation_id = 0;
+        ecs_entity_t target_id = 0;
+        bool is_tag = false;
+    };
+    
+    std::vector<QueryTerm> query_terms;
     int non_tag_component_count = 0;
     bool next_archetype = true;
     size_t i = 0;
     size_t current = 0;
+    
 public:
     PyQueryIterator(flecs::world& w, py::args args) : world(w) {
-        // Convert py::args to std::vector<py::object>
-
+        // Parse query arguments
         for (auto arg : args) {
+            QueryTerm term;
             py::object comp_type = arg.cast<py::object>();
-            std::string component_name;
-            if (py::isinstance<py::str>(comp_type)) { // Tags are strings
-                component_name = comp_type.cast<std::string>();
-                tag_indices.push_back(true);
+            
+            // Check if this is a tuple (relationship pair)
+            if (py::isinstance<py::tuple>(comp_type)) {
+                py::tuple rel_pair = comp_type.cast<py::tuple>();
+                if (rel_pair.size() != 2) {
+                    throw std::runtime_error("Relationship tuple must have exactly 2 elements");
+                }
+                
+                term.is_relationship = true;
+                
+                // Parse relation (first element)
+                py::object relation = rel_pair[0];
+                if (py::isinstance<py::str>(relation)) {
+                    std::string rel_name = relation.cast<std::string>();
+                    if (rel_name == "*") {
+                        term.is_wildcard_relation = true;
+                        term.relation_id = EcsWildcard;
+                    } else {
+                        term.relation_id = world.entity(rel_name.c_str()).id();
+                    }
+                } else if (py::isinstance<PyEntity>(relation)) {
+                    // Handle PyEntity directly
+                    PyEntity rel_entity = relation.cast<PyEntity>();
+                    term.relation_id = rel_entity.entity.id();
+                } else {
+                    // Assume it's a component type
+                    std::string rel_name = py::str(relation.attr("__name__"));
+                    term.relation_id = world.entity(rel_name.c_str()).id();
+                }
+                
+                // Parse target (second element)
+                py::object target = rel_pair[1];
+                if (py::isinstance<py::str>(target)) {
+                    std::string tgt_name = target.cast<std::string>();
+                    if (tgt_name == "*") {
+                        term.is_wildcard_target = true;
+                        term.target_id = EcsWildcard;
+                    } else {
+                        term.target_id = world.entity(tgt_name.c_str()).id();
+                    }
+                } else if (py::isinstance<PyEntity>(target)) {
+                    // Handle PyEntity directly
+                    PyEntity tgt_entity = target.cast<PyEntity>();
+                    term.target_id = tgt_entity.entity.id();
+                } else {
+                    // Assume it's a component type
+                    std::string tgt_name = py::str(target.attr("__name__"));
+                    term.target_id = world.entity(tgt_name.c_str()).id();
+                }
+                
+                // Create pair ID
+                term.id = ecs_pair(term.relation_id, term.target_id);
+                term.is_tag = true; // Relationships are typically tags unless they have component data
             } else {
-                component_name = py::str(comp_type.attr("__name__"));
-                tag_indices.push_back(false);
-                non_tag_component_count++;
+                // Regular component or tag
+                if (py::isinstance<py::str>(comp_type)) {
+                    // Tag
+                    std::string component_name = comp_type.cast<std::string>();
+                    term.id = world.entity(component_name.c_str()).id();
+                    term.is_tag = true;
+                } else {
+                    // Component
+                    std::string component_name = py::str(comp_type.attr("__name__"));
+                    term.id = world.entity(component_name.c_str()).id();
+                    term.is_tag = false;
+                    non_tag_component_count++;
+                }
             }
-            ecs_entity_t component_id = world.entity(component_name.c_str());
-            component_ids.push_back(component_id);
+            
+            query_terms.push_back(term);
         }
+        
+        // Build query description
         ecs_query_desc_t desc = {};
-
-        for (size_t i = 0; i < component_ids.size() && i < 32; ++i) {
+        for (size_t i = 0; i < query_terms.size() && i < 32; ++i) {
             desc.terms[i] = {
-                .id = component_ids[i],
+                .id = query_terms[i].id,
                 .inout = EcsInOut
             };
         }
-        // desc.term_count = terms.size();
         
         query = ecs_query_init(world, &desc);
         it = ecs_query_iter(world, query);
     }
-
+    
     PyQueryIterator& iter() {
         return *this;
     }
-        
+    
     py::list next() {
         bool result = true;
-        if (next_archetype)
-        {
+        if (next_archetype) {
             result = ecs_query_next(&it);
             next_archetype = false;
             i = 0;
             current = it.count;
         }
-        if (result)
-        {
+        
+        if (result) {
             ecs_entity_t source = it.entities[i];
             py::list value;
             
@@ -176,16 +580,53 @@ public:
             PyEntity py_entity(flecs::entity(world, source));
             value.append(py_entity);
             
-            // Append the component data
-            for (size_t c = 0; c < non_tag_component_count; c++)
-            {
-                for (;tag_indices[c] && c < non_tag_component_count;c++) {}
-                value.append(flecs_component_pyobject[source][component_ids[c]]);
+            // Process each query term
+            for (size_t term_idx = 0; term_idx < query_terms.size(); term_idx++) {
+                const QueryTerm& term = query_terms[term_idx];
+                
+                if (term.is_relationship) {
+                    if (term.is_wildcard_target || term.is_wildcard_relation) {
+                        // For wildcard relationships, we need to get the actual pair from the iterator
+                        ecs_id_t actual_id = ecs_field_id(&it, term_idx);
+                        
+                        if (ECS_IS_PAIR(actual_id)) {
+                            ecs_entity_t actual_relation = ecs_pair_first(world, actual_id);
+                            ecs_entity_t actual_target = ecs_pair_second(world, actual_id);
+                            
+                            if (term.is_wildcard_target) {
+                                // Return the actual target entity
+                                PyEntity target_entity(flecs::entity(world, actual_target));
+                                value.append(target_entity);
+                            }
+                            
+                            if (term.is_wildcard_relation) {
+                                // Return the actual relation entity
+                                PyEntity relation_entity(flecs::entity(world, actual_relation));
+                                value.append(relation_entity);
+                            }
+                            
+                            // Check if there's component data for this relationship
+                            if (flecs_component_pyobject[source].count(actual_id)) {
+                                value.append(flecs_component_pyobject[source][actual_id]);
+                            }
+                        }
+                    } else {
+                        // Specific relationship pair
+                        if (flecs_component_pyobject[source].count(term.id)) {
+                            value.append(flecs_component_pyobject[source][term.id]);
+                        }
+                    }
+                } else if (!term.is_tag) {
+                    // Regular component
+                    if (flecs_component_pyobject[source].count(term.id)) {
+                        value.append(flecs_component_pyobject[source][term.id]);
+                    }
+                }
+                // Tags don't add anything to the result tuple
             }
             
             i++;
-            if (i == current)
-            {
+            if (i == current) {
                 next_archetype = true;
             }
             return value;
@@ -198,8 +639,10 @@ public:
         it = ecs_query_iter(world, query);
         i = 0;
         current = 0;
+        next_archetype = true;
     }
 };
+
 
 void PythonObserverCallback(ecs_iter_t *it) {
     ecs_world_t *ecs = it->world;
@@ -412,18 +855,52 @@ PYBIND11_MODULE(_core, m) {
     m.attr("OnRemove") = EcsOnRemove;
     m.attr("OnSet") = EcsOnSet;
     
-    // Bind PyEntity class
     py::class_<PyEntity>(m, "Entity")
         .def("id", &PyEntity::id)
         .def("name", &PyEntity::name)
+        .def("path", &PyEntity::path)
+        .def("children", &PyEntity::children)
         .def("set_name", &PyEntity::set_name)
         .def("is_alive", &PyEntity::is_alive)
         .def("destroy", &PyEntity::destroy)
         .def("has_tag", &PyEntity::has_tag)
         .def("remove_tag", &PyEntity::remove_tag)
-        .def("add", &PyEntity::add_tag)
+        .def("add_tag", &PyEntity::add_tag)
+        .def("get_relationship_component", &PyEntity::get_relationship_component)
+        // Overloaded add methods for relationships and tags
+        .def("add", py::overload_cast<const std::string&>(&PyEntity::add))
+        .def("add", py::overload_cast<const std::string&, const std::string&>(&PyEntity::add))
+        .def("add", py::overload_cast<const std::string&, PyEntity&>(&PyEntity::add))
+        .def("add", py::overload_cast<PyEntity&, PyEntity&>(&PyEntity::add))
+        .def("add", py::overload_cast<PyEntity&, const std::string&>(&PyEntity::add))
+        .def("add", py::overload_cast<const std::string&, py::object>(&PyEntity::add))
+        .def("add", py::overload_cast<py::object, const std::string&>(&PyEntity::add))
+        .def("add", py::overload_cast<py::object, py::object>(&PyEntity::add))
+
+        .def("child_of", (&PyEntity::child_of))
+        // Overloaded has methods
+        .def("has", py::overload_cast<const std::string&>(&PyEntity::has))
+        .def("has", py::overload_cast<const std::string&, const std::string&>(&PyEntity::has))
+        .def("has", py::overload_cast<const std::string&, PyEntity&>(&PyEntity::has))
+        .def("has", py::overload_cast<PyEntity&, PyEntity&>(&PyEntity::has))
+        .def("has", py::overload_cast<PyEntity&, const std::string&>(&PyEntity::has))
+        .def("has", py::overload_cast<const std::string&, py::object>(&PyEntity::has))
+        .def("has", py::overload_cast<py::object, const std::string&>(&PyEntity::has))
+        .def("has", py::overload_cast<py::object, py::object>(&PyEntity::has))
+        // Overloaded remove methods
+        .def("remove", py::overload_cast<const std::string&>(&PyEntity::remove))
+        .def("remove", py::overload_cast<const std::string&, const std::string&>(&PyEntity::remove))
+        .def("remove", py::overload_cast<const std::string&, PyEntity&>(&PyEntity::remove))
+        .def("remove", py::overload_cast<PyEntity&, PyEntity&>(&PyEntity::remove))
+        .def("remove", py::overload_cast<PyEntity&, const std::string&>(&PyEntity::remove))
+        // Relationship traversal methods
+        .def("get_targets", py::overload_cast<const std::string&>(&PyEntity::get_targets))
+        .def("get_targets", py::overload_cast<PyEntity&>(&PyEntity::get_targets))
+        .def("get_sources", py::overload_cast<const std::string&>(&PyEntity::get_sources))
+        .def("get_sources", py::overload_cast<PyEntity&>(&PyEntity::get_sources))
+        // Component methods
         .def("set", &PyEntity::set_component_instance)
-        .def("get", &PyEntity::get_component) // New get method for components
+        .def("get", &PyEntity::get_component)
         .def("__repr__", [](const PyEntity& e) {
             return "Entity(id=" + std::to_string(e.id()) + ", name=\"" + e.name() + "\")";
         });
