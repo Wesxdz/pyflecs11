@@ -21,6 +21,3 @@ if __name__ == "__main__":
 
     for food in jonny.get_targets("Eats"):
         print(f"Jonny eats {food}")
-
-    for action in jonny.get_rels):
-        print(f"Jonny takes {action}")

@@ -17,6 +17,8 @@ namespace py = pybind11;
 static std::map<flecs::id_t, std::map<flecs::id_t, py::object>> flecs_component_pyobject;
 static std::vector<py::object> observer_callbacks;
 static std::vector<py::object> system_callbacks;
+static std::vector<py::object> observer_iter_callbacks;
+static std::vector<py::object> system_iter_callbacks;
 
 class PyEntity {
 public:
@@ -347,6 +349,24 @@ public:
         remove_relationship(relation, target_name);
     }
     
+    void remove_component(py::object py_component_type) {
+        std::string component_type_name = py::str(py_component_type.attr("__name__"));
+        flecs::entity component_entity = entity.world().lookup(component_type_name.c_str());
+        
+        if (component_entity.is_valid()) {
+            // Remove the component from Flecs
+            entity.remove(component_entity);
+            
+            // Remove the stored Python object
+            flecs_component_pyobject[entity.id()].erase(component_entity.id());
+        }
+    }
+
+    // Add this overload to your existing remove methods (after the last remove overload):
+    void remove(py::object py_component_type) {
+        remove_component(py_component_type);
+    }
+
     // Get all targets for a given relation (string)
     std::vector<PyEntity> get_targets(const std::string& relation_name) {
         std::vector<PyEntity> targets;
@@ -417,6 +437,87 @@ public:
         if (flecs_component_pyobject[entity.id()].count(flecs_comp_id.id())) {
             return flecs_component_pyobject[entity.id()][flecs_comp_id.id()];
         }
+        return py::none();
+    }
+};
+
+class PyIterator {
+private:
+    ecs_iter_t* it;
+    flecs::world world;
+    
+public:
+    PyIterator(ecs_iter_t* iter, flecs::world w) : it(iter), world(w) {}
+    
+    // Return the actual event constant for direct comparison
+    ecs_entity_t event() const {
+        return it->event;
+    }
+    
+    // Keep string version as event_name() for debugging
+    std::string event_name() const {
+        if (it->event) {
+            const char* name = ecs_get_name(it->world, it->event);
+            return name ? std::string(name) : "";
+        }
+        return "";
+    }
+    
+    // Return the actual event_id constant  
+    ecs_entity_t event_id() const {
+        return it->event_id;
+    }
+    
+    // Keep string version as event_id_name() for debugging
+    std::string event_id_name() const {
+        if (it->event_id) {
+            const char* name = ecs_get_name(it->world, it->event_id);
+            return name ? std::string(name) : "";
+        }
+        return "";
+    }
+    
+    // Get entity count in this iteration
+    int32_t count() const {
+        return it->count;
+    }
+    
+    // Get entity at index
+    PyEntity entity(size_t index) const {
+        if (index < static_cast<size_t>(it->count)) {
+            return PyEntity(flecs::entity(world, it->entities[index]));
+        }
+        throw std::out_of_range("Entity index out of range");
+    }
+    
+    // Get delta time (for systems)
+    float delta_time() const {
+        return it->delta_time;
+    }
+    
+    // Get field count
+    int32_t field_count() const {
+        return it->field_count;
+    }
+    
+    // Check if field is set
+    bool is_set(int32_t field) const {
+        return ecs_field_is_set(it, field);
+    }
+    
+    // Get component for entity at index and field
+    py::object get_component(size_t entity_index, int32_t field) const {
+        if (entity_index >= static_cast<size_t>(it->count)) {
+            throw std::out_of_range("Entity index out of range");
+        }
+        
+        ecs_entity_t entity_id = it->entities[entity_index];
+        ecs_id_t field_id = ecs_field_id(it, field);
+        
+        if (flecs_component_pyobject[entity_id].count(field_id)) {
+            return flecs_component_pyobject[entity_id][field_id];
+        }
+        
         return py::none();
     }
 };
@@ -616,6 +717,8 @@ public:
         current = 0;
         next_archetype = true;
     }
+
+    
 };
 
 
@@ -697,6 +800,82 @@ void PythonSystemCallback(ecs_iter_t *it) {
     }
 }
 
+void PythonObserverIterCallback(ecs_iter_t *it) {
+    size_t callback_index = reinterpret_cast<size_t>(it->ctx);
+    
+    if (callback_index < observer_iter_callbacks.size()) {
+        py::object callback = observer_iter_callbacks[callback_index];
+        
+        // Create PyIterator wrapper
+        flecs::world world(it->world);
+        PyIterator py_iter(it, world);
+        
+        // Call Python callback with iterator and component arrays
+        py::list args;
+        args.append(py_iter);
+        
+        // Add component data for each field
+        for (int field = 0; field < it->field_count; field++) {
+            py::list field_components;
+            ecs_id_t field_id = ecs_field_id(it, field);
+            
+            for (int i = 0; i < it->count; i++) {
+                ecs_entity_t entity_id = it->entities[i];
+                if (flecs_component_pyobject[entity_id].count(field_id)) {
+                    field_components.append(flecs_component_pyobject[entity_id][field_id]);
+                } else {
+                    field_components.append(py::none());
+                }
+            }
+            args.append(field_components);
+        }
+        
+        try {
+            callback(*args);
+        } catch (const std::exception& e) {
+            py::print("Error in iterator observer callback:", e.what());
+        }
+    }
+}
+
+// Iterator-based system callback
+void PythonSystemIterCallback(ecs_iter_t *it) {
+    size_t callback_index = reinterpret_cast<size_t>(it->ctx);
+    
+    if (callback_index < system_iter_callbacks.size()) {
+        py::object callback = system_iter_callbacks[callback_index];
+        
+        flecs::world world(it->world);
+        PyIterator py_iter(it, world);
+        
+        py::list args;
+        args.append(py_iter);
+        
+        // Add component arrays for each field
+        for (int field = 0; field < it->field_count; field++) {
+            py::list field_components;
+            ecs_id_t field_id = ecs_field_id(it, field);
+            
+            for (int i = 0; i < it->count; i++) {
+                ecs_entity_t entity_id = it->entities[i];
+                if (flecs_component_pyobject[entity_id].count(field_id)) {
+                    field_components.append(flecs_component_pyobject[entity_id][field_id]);
+                } else {
+                    field_components.append(py::none());
+                }
+            }
+            args.append(field_components);
+        }
+        
+        try {
+            callback(*args);
+        } catch (const std::exception& e) {
+            py::print("Error in iterator system callback:", e.what());
+        }
+    }
+}
+
+
 // Simple wrapper for Flecs world
 class PyWorld {
 public:
@@ -713,14 +892,14 @@ public:
     ~PyWorld() {
         observer_callbacks.clear();
         system_callbacks.clear();
+        observer_iter_callbacks.clear();
+        system_iter_callbacks.clear();
     }
 
-    void create_observer(py::function callback, py::args component_types, ecs_entity_t event = EcsOnAdd) {
-        // Store the callback
+    void create_observer(py::function callback, py::args component_types, py::list events = py::list()) {
         size_t callback_index = observer_callbacks.size();
         observer_callbacks.push_back(callback);
         
-        // Parse component types (reuse query parsing logic)
         std::vector<ecs_entity_t> component_ids;
         for (auto arg : component_types) {
             py::object comp_type = arg.cast<py::object>();
@@ -729,22 +908,33 @@ public:
             component_ids.push_back(component_id);
         }
         
-        // Build observer description
-        ecs_observer_desc_t desc = {};
-        desc.callback = PythonObserverCallback;
-        desc.ctx = reinterpret_cast<void*>(callback_index);
-        desc.events[0] = event;
-        
-        // Set up query terms (same as query logic)
-        for (size_t i = 0; i < component_ids.size() && i < 32; ++i) {
-            desc.query.terms[i] = {
-                .id = component_ids[i],
-                .inout = EcsInOut
-            };
+        // Parse events list - default to OnAdd if empty
+        std::vector<ecs_entity_t> event_list;
+        if (events.size() == 0) {
+            event_list.push_back(EcsOnAdd);
+        } else {
+            for (auto event : events) {
+                ecs_entity_t event_id = event.cast<ecs_entity_t>();
+                event_list.push_back(event_id);
+            }
         }
         
-        // Create the observer
-        ecs_observer_init(world, &desc);
+        // Create observer for each event
+        for (ecs_entity_t event : event_list) {
+            ecs_observer_desc_t desc = {};
+            desc.callback = PythonObserverCallback;
+            desc.ctx = reinterpret_cast<void*>(callback_index);
+            desc.events[0] = event;
+            
+            for (size_t i = 0; i < component_ids.size() && i < 32; ++i) {
+                desc.query.terms[i] = {
+                    .id = component_ids[i],
+                    .inout = EcsInOut
+                };
+            }
+            
+            ecs_observer_init(world, &desc);
+        }
     }
 
     void create_system(py::function callback, py::args component_types) {
@@ -800,11 +990,85 @@ public:
             py::print("✓ System is in OnUpdate phase");
         }
     }
+
+    void create_observer_iter(py::function callback, py::args component_types, py::list events = py::list()) {
+        size_t callback_index = observer_iter_callbacks.size();
+        observer_iter_callbacks.push_back(callback);
+        
+        std::vector<ecs_entity_t> component_ids;
+        for (auto arg : component_types) {
+            py::object comp_type = arg.cast<py::object>();
+            std::string component_name = py::str(comp_type.attr("__name__"));
+            ecs_entity_t component_id = world.entity(component_name.c_str()).id();
+            component_ids.push_back(component_id);
+        }
+        
+        // Parse events list - default to OnAdd if empty
+        std::vector<ecs_entity_t> event_list;
+        if (events.size() == 0) {
+            event_list.push_back(EcsOnAdd);  // Default event
+        } else {
+            for (auto event : events) {
+                ecs_entity_t event_id = event.cast<ecs_entity_t>();
+                event_list.push_back(event_id);
+            }
+        }
+        
+        // Create observer for each event
+        for (ecs_entity_t event : event_list) {
+            ecs_observer_desc_t desc = {};
+            desc.callback = PythonObserverIterCallback;
+            desc.ctx = reinterpret_cast<void*>(callback_index);
+            desc.events[0] = event;
+            
+            for (size_t i = 0; i < component_ids.size() && i < 32; ++i) {
+                desc.query.terms[i] = {
+                    .id = component_ids[i],
+                    .inout = EcsInOut
+                };
+            }
+            
+            ecs_observer_init(world, &desc);
+        }
+    }
+    
+    // Create iterator-based system
+    void create_system_iter(py::function callback, py::args component_types) {
+        size_t callback_index = system_iter_callbacks.size();
+        system_iter_callbacks.push_back(callback);
+        
+        std::vector<ecs_entity_t> component_ids;
+        for (auto arg : component_types) {
+            py::object comp_type = arg.cast<py::object>();
+            std::string component_name = py::str(comp_type.attr("__name__"));
+            ecs_entity_t component_id = world.entity(component_name.c_str()).id();
+            component_ids.push_back(component_id);
+        }
+        
+        ecs_entity_t system_entity = ecs_new(world);
+        ecs_add_pair(world, system_entity, EcsDependsOn, EcsOnUpdate);
+        ecs_add_id(world, system_entity, EcsOnUpdate);
+        
+        ecs_system_desc_t desc = {};
+        desc.entity = system_entity;
+        desc.callback = PythonSystemIterCallback;
+        desc.ctx = reinterpret_cast<void*>(callback_index);
+        
+        for (size_t i = 0; i < component_ids.size() && i < 32; ++i) {
+            desc.query.terms[i] = {
+                .id = component_ids[i],
+                .inout = EcsInOut,
+                .oper = EcsAnd
+            };
+        }
+        
+        ecs_system_init(world, &desc);
+    }
         
     // Convenience method for decorator support
-    py::function observer_decorator(py::args component_types, ecs_entity_t event = EcsOnAdd) {
-        return py::cpp_function([this, component_types, event](py::function callback) {
-            this->create_observer(callback, component_types, event);
+    py::function observer_decorator(py::args component_types, py::list events = py::list()) {
+        return py::cpp_function([this, component_types, events](py::function callback) {
+            this->create_observer(callback, component_types, events);
             return callback;
         });
     }
@@ -812,6 +1076,20 @@ public:
     py::function system_decorator(py::args component_types) {
         return py::cpp_function([this, component_types](py::function callback) {
             this->create_system(callback, component_types);
+            return callback;
+        });
+    }
+
+    py::function observer_iter_decorator(py::args component_types, py::list events = py::list()) {
+        return py::cpp_function([this, component_types, events](py::function callback) {
+            this->create_observer_iter(callback, component_types, events);
+            return callback;
+        });
+    }
+    
+    py::function system_iter_decorator(py::args component_types) {
+        return py::cpp_function([this, component_types](py::function callback) {
+            this->create_system_iter(callback, component_types);
             return callback;
         });
     }
@@ -964,6 +1242,7 @@ PYBIND11_MODULE(_core, m) {
         .def("remove", py::overload_cast<const std::string&, PyEntity&>(&PyEntity::remove))
         .def("remove", py::overload_cast<PyEntity&, PyEntity&>(&PyEntity::remove))
         .def("remove", py::overload_cast<PyEntity&, const std::string&>(&PyEntity::remove))
+        .def("remove", py::overload_cast<py::object>(&PyEntity::remove))
         // Relationship traversal methods
         .def("get_targets", py::overload_cast<const std::string&>(&PyEntity::get_targets))
         .def("get_targets", py::overload_cast<PyEntity&>(&PyEntity::get_targets))
@@ -993,11 +1272,25 @@ PYBIND11_MODULE(_core, m) {
         .def("find_with_tag", &PyWorld::find_with_tag)
         .def("find_with_tags", &PyWorld::find_with_tags)
         .def("query", &PyWorld::query)
-        .def("observer", &PyWorld::observer_decorator, py::arg("event") = EcsOnAdd)
+        .def("observer", &PyWorld::observer_decorator, py::arg("events") = py::list())
         .def("system", &PyWorld::system_decorator)
+        .def("observer_iter", &PyWorld::observer_iter_decorator, py::arg("events") = py::list())
+        .def("system_iter", &PyWorld::system_iter_decorator)
         .def("__repr__", [](const PyWorld& w) {
             return w.info();
         });
+
+    py::class_<PyIterator>(m, "Iterator")
+        .def("event", &PyIterator::event)
+        .def("event_name", &PyIterator::event_name)
+        .def("event_id", &PyIterator::event_id)
+        .def("event_id_name", &PyIterator::event_id_name)
+        .def("count", &PyIterator::count)
+        .def("entity", &PyIterator::entity)
+        .def("delta_time", &PyIterator::delta_time)
+        .def("field_count", &PyIterator::field_count)
+        .def("is_set", &PyIterator::is_set)
+        .def("get_component", &PyIterator::get_component);
 
 #ifdef VERSION_INFO
     m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);

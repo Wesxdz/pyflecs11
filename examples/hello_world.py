@@ -23,10 +23,6 @@ def main():
         pos.x = pos.x + vel.x
         pos.y = pos.y + vel.y
 
-    @ecs.system(Position, Velocity)
-    def move(ent, pos, vel):
-        pos.x = pos.x + 0.5
-
     sander = ecs.entity("Sander", [Position(0, 0), Velocity(1, 2)])
     sander.add("Programs", "Flecs")
 
