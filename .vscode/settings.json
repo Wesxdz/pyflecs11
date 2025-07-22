@@ -80,6 +80,8 @@
         "stdfloat": "cpp",
         "__nullptr": "cpp",
         "__tree": "cpp",
-        "filesystem": "cpp"
+        "filesystem": "cpp",
+        "__locale": "cpp",
+        "variables.h": "c"
     }
 }

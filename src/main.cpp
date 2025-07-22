@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <typeindex> // For std::type_index
 
@@ -531,22 +532,53 @@ private:
     struct QueryTerm {
         ecs_entity_t id;
         bool is_relationship = false;
+        bool is_variable_source = false;
+        std::string src_name;
         bool is_wildcard_target = false;
+        bool is_variable_target = false;
         bool is_wildcard_relation = false;
+        bool is_variable_relation = false;
+        std::string first_name;
+        std::string second_name;
         ecs_entity_t relation_id = 0;
         ecs_entity_t target_id = 0;
         bool is_tag = false;
     };
     
     std::vector<QueryTerm> query_terms;
+    std::set<std::string> var_set;
+    std::vector<std::string> var_names;
+    std::vector<int> var_indices;
     int non_tag_component_count = 0;
     bool next_archetype = true;
     size_t i = 0;
     size_t current = 0;
+
+    // Helper function to check if string is a variable
+    bool is_variable(const std::string& str) {
+        return !str.empty() && str[0] == '$';
+    }
+    
+    // Helper function to parse entity from string or variable
+    ecs_entity_t parse_entity_or_variable(const std::string& str, bool& is_var, std::string& var_name) {
+        if (is_variable(str)) {
+            is_var = true;
+            var_name = str.substr(1); // Remove the $ prefix
+            return 0; // Variables don't have concrete IDs until runtime
+        } else if (str == "*") {
+            return EcsWildcard;
+        } else if (str == "_") {
+            return EcsThis; // Self/source entity
+        } else {
+            is_var = false;
+            return world.entity(str.c_str()).id();
+        }
+    }
     
 public:
     PyQueryIterator(flecs::world& w, py::args args) : world(w) {
         // Parse query arguments
+        py::print("Creating query iterator");
         for (auto arg : args) {
             QueryTerm term;
             py::object comp_type = arg.cast<py::object>();
@@ -554,55 +586,144 @@ public:
             // Check if this is a tuple (relationship pair)
             if (py::isinstance<py::tuple>(comp_type)) {
                 py::tuple rel_pair = comp_type.cast<py::tuple>();
-                if (rel_pair.size() != 2) {
-                    throw std::runtime_error("Relationship tuple must have exactly 2 elements");
-                }
                 
-                term.is_relationship = true;
-                
-                // Parse relation (first element)
-                py::object relation = rel_pair[0];
-                if (py::isinstance<py::str>(relation)) {
-                    std::string rel_name = relation.cast<std::string>();
-                    if (rel_name == "*") {
-                        term.is_wildcard_relation = true;
-                        term.relation_id = EcsWildcard;
+                if (rel_pair.size() == 2) {
+                    // Handle 2-tuple (existing logic)
+                    term.is_relationship = true;
+                    
+                    // Parse relation (first element)
+                    py::object relation = rel_pair[0];
+                    if (py::isinstance<py::str>(relation)) {
+                        std::string rel_name = relation.cast<std::string>();
+                        if (rel_name == "*") {
+                            term.is_wildcard_relation = true;
+                            term.relation_id = EcsWildcard;
+                        } else if (is_variable(rel_name))
+                        {
+                            py::print("Is variable source ");
+                            term.is_variable_source = true;
+                            term.src_name = rel_name;
+                        }   
+                        else {
+                            term.relation_id = world.entity(rel_name.c_str()).id();
+                        }
+                    } else if (py::isinstance<PyEntity>(relation)) {
+                        // Handle PyEntity directly
+                        PyEntity rel_entity = relation.cast<PyEntity>();
+                        term.relation_id = rel_entity.entity.id();
                     } else {
+                        // Assume it's a component type
+                        std::string rel_name = py::str(relation.attr("__name__"));
                         term.relation_id = world.entity(rel_name.c_str()).id();
                     }
-                } else if (py::isinstance<PyEntity>(relation)) {
-                    // Handle PyEntity directly
-                    PyEntity rel_entity = relation.cast<PyEntity>();
-                    term.relation_id = rel_entity.entity.id();
-                } else {
-                    // Assume it's a component type
-                    std::string rel_name = py::str(relation.attr("__name__"));
-                    term.relation_id = world.entity(rel_name.c_str()).id();
-                }
-                
-                // Parse target (second element)
-                py::object target = rel_pair[1];
-                if (py::isinstance<py::str>(target)) {
-                    std::string tgt_name = target.cast<std::string>();
-                    if (tgt_name == "*") {
-                        term.is_wildcard_target = true;
-                        term.target_id = EcsWildcard;
+                    
+                    // Parse target (second element)
+                    py::object target = rel_pair[1];
+                    if (py::isinstance<py::str>(target)) {
+                        std::string tgt_name = target.cast<std::string>();
+                        if (tgt_name == "*") {
+                            term.is_wildcard_target = true;
+                            term.target_id = EcsWildcard;
+                        } 
+                        else if (is_variable(tgt_name))
+                        {
+                            term.is_variable_target = true;
+                            term.second_name = tgt_name;
+                        } 
+                        else {
+                            term.target_id = world.entity(tgt_name.c_str()).id();
+                        }
+                    } else if (py::isinstance<PyEntity>(target)) {
+                        // Handle PyEntity directly
+                        PyEntity tgt_entity = target.cast<PyEntity>();
+                        term.target_id = tgt_entity.entity.id();
                     } else {
+                        // Assume it's a component type
+                        std::string tgt_name = py::str(target.attr("__name__"));
                         term.target_id = world.entity(tgt_name.c_str()).id();
                     }
-                } else if (py::isinstance<PyEntity>(target)) {
-                    // Handle PyEntity directly
-                    PyEntity tgt_entity = target.cast<PyEntity>();
-                    term.target_id = tgt_entity.entity.id();
+                    
+                    // Create pair ID
+                    term.id = ecs_pair(term.relation_id, term.target_id);
+                    term.is_tag = true; // Relationships are typically tags unless they have component data
+                    
+                } else if (rel_pair.size() == 3) {
+                    // Handle 3-tuple (variable, relation, target)
+                    term.is_relationship = true;
+                    
+                    // Parse variable (0th element - always a variable)
+                    py::object variable = rel_pair[0];
+                    if (py::isinstance<py::str>(variable)) {
+                        std::string var_name = variable.cast<std::string>();
+                        if (is_variable(var_name)) {
+                            term.is_variable_source = true;
+                            term.src_name = var_name;
+                        } else {
+                            throw std::runtime_error("First element of 3-tuple must be a variable");
+                        }
+                    } else {
+                        throw std::runtime_error("First element of 3-tuple must be a variable string");
+                    }
+                    
+                    // Parse relation (first element)
+                    py::object relation = rel_pair[1];
+                    if (py::isinstance<py::str>(relation)) {
+                        std::string rel_name = relation.cast<std::string>();
+                        if (rel_name == "*") {
+                            term.is_wildcard_relation = true;
+                            term.relation_id = EcsWildcard;
+                        } else if (is_variable(rel_name))
+                        {
+                            py::print("Is variable relationship");
+                            term.is_variable_relation = true;
+                            term.first_name = rel_name;
+                        }   
+                        else {
+                            term.relation_id = world.entity(rel_name.c_str()).id();
+                        }
+                    } else if (py::isinstance<PyEntity>(relation)) {
+                        // Handle PyEntity directly
+                        PyEntity rel_entity = relation.cast<PyEntity>();
+                        term.relation_id = rel_entity.entity.id();
+                    } else {
+                        // Assume it's a component type
+                        std::string rel_name = py::str(relation.attr("__name__"));
+                        term.relation_id = world.entity(rel_name.c_str()).id();
+                    }
+                    
+                    // Parse target (second element)
+                    py::object target = rel_pair[2];
+                    if (py::isinstance<py::str>(target)) {
+                        std::string tgt_name = target.cast<std::string>();
+                        if (tgt_name == "*") {
+                            term.is_wildcard_target = true;
+                            term.target_id = EcsWildcard;
+                        } 
+                        else if (is_variable(tgt_name))
+                        {
+                            term.is_variable_target = true;
+                            term.second_name = tgt_name;
+                        } 
+                        else {
+                            term.target_id = world.entity(tgt_name.c_str()).id();
+                        }
+                    } else if (py::isinstance<PyEntity>(target)) {
+                        // Handle PyEntity directly
+                        PyEntity tgt_entity = target.cast<PyEntity>();
+                        term.target_id = tgt_entity.entity.id();
+                    } else {
+                        // Assume it's a component type
+                        std::string tgt_name = py::str(target.attr("__name__"));
+                        term.target_id = world.entity(tgt_name.c_str()).id();
+                    }
+                    
+                    // Create pair ID
+                    term.id = ecs_pair(term.relation_id, term.target_id);
+                    term.is_tag = true; // Relationships are typically tags unless they have component data
+                    
                 } else {
-                    // Assume it's a component type
-                    std::string tgt_name = py::str(target.attr("__name__"));
-                    term.target_id = world.entity(tgt_name.c_str()).id();
+                    throw std::runtime_error("Relationship tuple must have exactly 2 or 3 elements");
                 }
-                
-                // Create pair ID
-                term.id = ecs_pair(term.relation_id, term.target_id);
-                term.is_tag = true; // Relationships are typically tags unless they have component data
             } else {
                 // Regular component or tag
                 if (py::isinstance<py::str>(comp_type)) {
@@ -618,20 +739,82 @@ public:
                     non_tag_component_count++;
                 }
             }
+
+            if (term.is_variable_target && !term.is_variable_source)
+            {
+                if (!var_set.count("$this"))
+                {
+                    var_set.insert("$this");
+                    var_names.push_back("this");
+                }
+            }
+            if (term.is_variable_source)
+            {
+                if (!var_set.count(term.src_name))
+                {
+                    var_set.insert(term.src_name);
+                    var_names.push_back(term.src_name.substr(1));
+                }
+            }
+            if (term.is_variable_relation)
+            {
+                if (!var_set.count(term.first_name))
+                {
+                    var_set.insert(term.first_name);
+                    var_names.push_back(term.first_name.substr(1));
+                }
+            }
+            if (term.is_variable_target)
+            {
+                if (!var_set.count(term.second_name))
+                {
+                    var_set.insert(term.second_name);
+                    var_names.push_back(term.second_name.substr(1));
+                }
+            }
             
             query_terms.push_back(term);
         }
-        
         // Build query description
+        py::print("Build query description");
         ecs_query_desc_t desc = {};
         for (size_t i = 0; i < query_terms.size() && i < 32; ++i) {
-            desc.terms[i] = {
-                .id = query_terms[i].id,
-                .inout = EcsInOut
-            };
+            if (query_terms[i].is_variable_source && query_terms[i].is_variable_target)
+            {
+                py::print("Add variable source term ", query_terms[i].src_name.c_str());
+                desc.terms[i].src.name = query_terms[i].src_name.c_str();
+                desc.terms[i].first.id = query_terms[i].relation_id;
+                py::print("Add variable target term ", query_terms[i].second_name.c_str());
+                desc.terms[i].second.name = query_terms[i].second_name.c_str();
+            }
+            else if (query_terms[i].is_variable_source)
+            {
+                py::print("Add variable source term ", query_terms[i].src_name.c_str());
+                desc.terms[i].first.id = query_terms[i].target_id;
+                desc.terms[i].src.name = query_terms[i].src_name.c_str();
+            }
+            else if (query_terms[i].is_variable_target)
+            {
+                py::print("Add variable target term ", query_terms[i].second_name.c_str());
+                desc.terms[i].first.id = query_terms[i].relation_id;
+                desc.terms[i].second.name = query_terms[i].second_name.c_str();
+            }
+            else if (query_terms[i].is_variable_relation)
+            {
+                py::print("Add variable relationship term ", query_terms[i].first_name.c_str());
+                desc.terms[i].first.name = query_terms[i].first_name.c_str();
+                // desc.terms[i].first.name = query_terms[i].second_name.c_str();
+            } else
+            {
+                desc.terms[i].id = query_terms[i].id;
+            }
         }
         
         query = ecs_query_init(world, &desc);
+        for (std::string var_name : var_names)
+        {
+            var_indices.push_back(ecs_query_find_var(query, var_name.c_str()));
+        }
         it = ecs_query_iter(world, query);
     }
     
@@ -652,9 +835,16 @@ public:
             ecs_entity_t source = it.entities[i];
             py::list value;
             
-            // Create a PyEntity from the flecs entity and append it
-            PyEntity py_entity(flecs::entity(world, source));
-            value.append(py_entity);
+            // Create a PyEntity from $this flecs entity as the first argument
+
+            int z = 0;
+            for (int var_index : var_indices)
+            {
+                py::print(var_names[z]);
+                PyEntity py_entity(flecs::entity(world, ecs_iter_get_var(&it, var_index)));
+                value.append(py_entity);
+                z++;
+            }
             
             // Process each query term
             for (size_t term_idx = 0; term_idx < query_terms.size(); term_idx++) {
@@ -1250,7 +1440,7 @@ PYBIND11_MODULE(_core, m) {
         .def("set", &PyEntity::set_component_instance)
         .def("get", &PyEntity::get_component)
         .def("__repr__", [](const PyEntity& e) {
-            return "Entity(id=" + std::to_string(e.id()) + ", name=\"" + e.name() + "\")";
+            return e.name() + "(" + std::to_string(e.id()) + ")";
         });
 
         // Bind PyQuery with iterator support
