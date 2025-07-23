@@ -1166,16 +1166,6 @@ public:
             py::print("ERROR: Failed to create system!");
             return;
         }
-        
-        py::print("System created with ID:", result);
-        
-        // Verify the system setup
-        if (ecs_has_pair(world, result, EcsDependsOn, EcsOnUpdate)) {
-            py::print("✓ System properly depends on OnUpdate");
-        }
-        if (ecs_has_id(world, result, EcsOnUpdate)) {
-            py::print("✓ System is in OnUpdate phase");
-        }
     }
 
     void create_observer_iter(py::function callback, py::args component_types, py::list events = py::list()) {

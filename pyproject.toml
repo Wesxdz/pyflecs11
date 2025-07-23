@@ -5,11 +5,12 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "flecs"
-version = "0.0.1"
-description="A minimal example package (with pybind11)"
+version = "0.0.2"
+description="A minimal example of flecs Python bindings with pybind11"
 readme = "README.md"
 authors = [
-  { name = "My Name", email = "me@email.com" },
+  { name = "Wesley Spacebar", email = "sirwesleybarlow@gmail.com" },
+  { name = "Heonae Aeri", email = "heonae@paphos.one" },
 ]
 requires-python = ">=3.9"
 classifiers = [
@@ -25,6 +26,9 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Wesxdz/pyflecs11"
+
 [project.optional-dependencies]
 test = ["pytest"]
 
@@ -32,7 +36,7 @@ test = ["pytest"]
 [tool.scikit-build]
 wheel.expand-macos-universal-tags = true
 minimum-version = "build-system.requires"
-
+sdist.include = ["deps/"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
