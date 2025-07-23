@@ -1,13 +1,14 @@
 import flecs
-from dataclasses import dataclass
 
 def main():
     ecs = flecs.World()
 
     bambara = ecs.entity("Bambara groundnut", ["Healthy"])
     madagascar = ecs.entity("Madagascar")
-    madagascar.add("In", "Africa")
+    madagascar.add("Africa")
     bambara.add("GrowsIn", "Madagascar")
+    mango = ecs.entity("Mango", ["Healthy"])
+    mango.add("GrowsIn", "Madagascar")
     hazlenuts = ecs.entity("Hazlenuts", ["Healthy"])
     hazlenuts.add("GrowsIn", "Oregon")
     apples = ecs.entity("Apples", ["Healthy"])
@@ -17,14 +18,17 @@ def main():
     chocolate = ecs.entity("Chocolate")
 
     luciano = ecs.entity("Luciano")
-    for food in [bambara, burgers, pizza]:
+    for food in [bambara, mango, burgers, pizza]:
         luciano.add("Eats", food) 
     alice = ecs.entity("Alice")
     for food in [hazlenuts, chocolate, apples]:
         alice.add("Eats", food)
 
-    # for person, food, place in ecs.query(("Eats", "$food"), ("$food", "Healthy"), ("$food", "GrowsIn", "$place")):
-    for person, food, place in ecs.query(("Eats", "$food"), ("$food", "Healthy"), ("$food", "GrowsIn", "$place")):
+    for person, food, place in ecs.query(
+        ("Eats", "$food"), 
+        ("$food", "Healthy"), 
+        ("$food", "GrowsIn", "$place")
+        ):
         print(f"{person} eats {food} which grow in {place}")
 
 if __name__ == "__main__":

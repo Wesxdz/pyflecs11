@@ -578,7 +578,6 @@ private:
 public:
     PyQueryIterator(flecs::world& w, py::args args) : world(w) {
         // Parse query arguments
-        py::print("Creating query iterator");
         for (auto arg : args) {
             QueryTerm term;
             py::object comp_type = arg.cast<py::object>();
@@ -600,7 +599,6 @@ public:
                             term.relation_id = EcsWildcard;
                         } else if (is_variable(rel_name))
                         {
-                            py::print("Is variable source ");
                             term.is_variable_source = true;
                             term.src_name = rel_name;
                         }   
@@ -674,7 +672,6 @@ public:
                             term.relation_id = EcsWildcard;
                         } else if (is_variable(rel_name))
                         {
-                            py::print("Is variable relationship");
                             term.is_variable_relation = true;
                             term.first_name = rel_name;
                         }   
@@ -771,37 +768,38 @@ public:
                     var_set.insert(term.second_name);
                     var_names.push_back(term.second_name.substr(1));
                 }
+            } 
+            if (!term.is_variable_source && !term.is_variable_relation && !term.is_variable_target)
+            {
+                if (!var_set.count("$this"))
+                {
+                    var_set.insert("$this");
+                    var_names.push_back("this");
+                }
             }
             
             query_terms.push_back(term);
         }
-        // Build query description
-        py::print("Build query description");
         ecs_query_desc_t desc = {};
         for (size_t i = 0; i < query_terms.size() && i < 32; ++i) {
             if (query_terms[i].is_variable_source && query_terms[i].is_variable_target)
             {
-                py::print("Add variable source term ", query_terms[i].src_name.c_str());
                 desc.terms[i].src.name = query_terms[i].src_name.c_str();
                 desc.terms[i].first.id = query_terms[i].relation_id;
-                py::print("Add variable target term ", query_terms[i].second_name.c_str());
                 desc.terms[i].second.name = query_terms[i].second_name.c_str();
             }
             else if (query_terms[i].is_variable_source)
             {
-                py::print("Add variable source term ", query_terms[i].src_name.c_str());
                 desc.terms[i].first.id = query_terms[i].target_id;
                 desc.terms[i].src.name = query_terms[i].src_name.c_str();
             }
             else if (query_terms[i].is_variable_target)
             {
-                py::print("Add variable target term ", query_terms[i].second_name.c_str());
                 desc.terms[i].first.id = query_terms[i].relation_id;
                 desc.terms[i].second.name = query_terms[i].second_name.c_str();
             }
             else if (query_terms[i].is_variable_relation)
             {
-                py::print("Add variable relationship term ", query_terms[i].first_name.c_str());
                 desc.terms[i].first.name = query_terms[i].first_name.c_str();
                 // desc.terms[i].first.name = query_terms[i].second_name.c_str();
             } else
@@ -840,7 +838,6 @@ public:
             int z = 0;
             for (int var_index : var_indices)
             {
-                py::print(var_names[z]);
                 PyEntity py_entity(flecs::entity(world, ecs_iter_get_var(&it, var_index)));
                 value.append(py_entity);
                 z++;
