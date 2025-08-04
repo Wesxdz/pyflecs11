@@ -13,8 +13,8 @@
 
 namespace py = pybind11;
 
-// Each (non-tag) component or relationship id on an entity is mapped to a py::object
-// This allows arbitrary Python classes/variables (such as neural networks) as components
+// Each (non-tag) component on an entity is mapped to a py::object
+// This allows arbitrary Python classes/variables (such as neural networks) as component fields
 static std::map<flecs::id_t, std::map<flecs::id_t, py::object>> flecs_component_pyobject;
 static std::vector<py::object> observer_callbacks;
 static std::vector<py::object> system_callbacks;
@@ -63,6 +63,26 @@ public:
     // Delete entity
     void destroy() { 
         entity.destruct(); 
+    }
+
+
+    PyEntity* add_trait(const std::string& trait_name) {
+        if (trait_name == "Transitive") {
+            entity.add(flecs::Transitive);
+        }
+        else if (trait_name == "Reflexive") {
+            entity.add(flecs::Reflexive);
+        }
+        else if (trait_name == "Symmetric") {
+            entity.add(flecs::Symmetric);
+        }
+        else if (trait_name == "Exclusive") {
+            entity.add(flecs::Exclusive);
+        }
+        else {
+            throw std::runtime_error("Unknown trait: " + trait_name);
+        }
+        return this;
     }
     
     // Add a tag (create tag entity if it doesn't exist, then add it)
@@ -733,7 +753,6 @@ public:
                     // Tag
                     std::string component_name = comp_type.cast<std::string>();
                     term.id = world.entity(component_name.c_str()).id();
-                    py::print("Tag in query ", term.id);
                     term.is_tag = true;
                 } else {
                     // Component
@@ -1101,18 +1120,70 @@ public:
                 py::object item_obj = item.cast<py::object>();
                 
                 if (py::isinstance<py::str>(item_obj)) {
+                    // Handle string as tag
                     std::string tag_name = py::str(item_obj);
                     entity.add_tag(tag_name);
                 }
+                else if (py::isinstance<py::tuple>(item_obj)) {
+                    // Handle tuple as relationship
+                    py::tuple rel_tuple = item_obj.cast<py::tuple>();
+                    
+                    if (rel_tuple.size() == 2) {
+                        // Two-element tuple: (relation, target)
+                        py::object relation = rel_tuple[0];
+                        py::object target = rel_tuple[1];
+                        
+                        if (py::isinstance<py::str>(relation) && py::isinstance<py::str>(target)) {
+                            // Both strings
+                            entity.add_relationship(relation.cast<std::string>(), target.cast<std::string>());
+                        }
+                        else if (py::isinstance<py::str>(relation) && py::isinstance<PyEntity>(target)) {
+                            // String relation, PyEntity target
+                            PyEntity target_entity = target.cast<PyEntity>();
+                            entity.add_relationship(relation.cast<std::string>(), target_entity);
+                        }
+                        else if (py::isinstance<PyEntity>(relation) && py::isinstance<py::str>(target)) {
+                            // PyEntity relation, string target
+                            PyEntity relation_entity = relation.cast<PyEntity>();
+                            entity.add_relationship(relation_entity, target.cast<std::string>());
+                        }
+                        else if (py::isinstance<PyEntity>(relation) && py::isinstance<PyEntity>(target)) {
+                            // Both PyEntity
+                            PyEntity relation_entity = relation.cast<PyEntity>();
+                            PyEntity target_entity = target.cast<PyEntity>();
+                            entity.add_relationship(relation_entity, target_entity);
+                        }
+                        else if (py::isinstance<py::str>(relation)) {
+                            // String relation, component target
+                            entity.add_relationship(relation.cast<std::string>(), target);
+                        }
+                        else if (py::isinstance<py::str>(target)) {
+                            // Component relation, string target
+                            entity.add_relationship(relation, target.cast<std::string>());
+                        }
+                        else {
+                            // Component relation, component target
+                            entity.add_relationship(relation, target);
+                        }
+                    }
+                    else {
+                        py::print("Warning: Relationship tuple must have exactly 2 elements, got", rel_tuple.size());
+                    }
+                }
                 else {
+                    // Handle as component instance
                     entity.set_component_instance(item_obj);
                 }
             } catch (const std::exception& e) {
-                py::print("Error processing component/tag:", e.what());
+                py::print("Error processing component/tag/relationship:", e.what());
             }
         }
         
         return entity;
+    }
+
+    PyEntity component(const std::string& name) {
+        return PyEntity(world.component(name.c_str()));
     }
 
     PyEntity prefab(const std::string& name) {
@@ -1415,6 +1486,7 @@ PYBIND11_MODULE(_core, m) {
     m.attr("OnSet") = EcsOnSet;
     m.attr("OnInstantiate") = EcsOnInstantiate;
     m.attr("OnInherit") = EcsInherit;
+    m.attr("Transitive") = flecs::Transitive;
     
     py::class_<PyEntity>(m, "Entity")
         .def("id", &PyEntity::id)
@@ -1462,6 +1534,7 @@ PYBIND11_MODULE(_core, m) {
         // Component methods
         .def("set", &PyEntity::set_component_instance)
         .def("get", &PyEntity::get_component)
+        .def("add_trait", &PyEntity::add_trait)
         .def("__repr__", [](const PyEntity& e) {
             return e.name() + "(" + std::to_string(e.id()) + ")";
         });
@@ -1480,6 +1553,7 @@ PYBIND11_MODULE(_core, m) {
         .def("entity", py::overload_cast<const std::string&>(&PyWorld::entity))
         .def("entity", py::overload_cast<const std::string&, const py::list&>(&PyWorld::entity))
         .def("prefab", py::overload_cast<const std::string&>(&PyWorld::prefab))
+        .def("component", &PyWorld::component)
         .def("prefab", py::overload_cast<const std::string&, const py::list&>(&PyWorld::prefab))
         .def("lookup", &PyWorld::lookup)
         .def("progress", &PyWorld::progress, py::arg("delta_time") = 0.0f)
