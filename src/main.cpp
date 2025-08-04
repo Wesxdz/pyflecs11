@@ -202,6 +202,12 @@ public:
         entity.child_of(parent.entity);
         return this;
     }
+
+    PyEntity* is_a(PyEntity& prefab)
+    {
+        ecs_add_pair(entity.world(), entity, EcsIsA, prefab.entity);
+        return this;
+    }
     
     // Check if entity has a tag
     bool has_tag(const std::string& tag_name) {
@@ -727,6 +733,7 @@ public:
                     // Tag
                     std::string component_name = comp_type.cast<std::string>();
                     term.id = world.entity(component_name.c_str()).id();
+                    py::print("Tag in query ", term.id);
                     term.is_tag = true;
                 } else {
                     // Component
@@ -838,9 +845,15 @@ public:
             int z = 0;
             for (int var_index : var_indices)
             {
-                PyEntity py_entity(flecs::entity(world, ecs_iter_get_var(&it, var_index)));
-                value.append(py_entity);
-                z++;
+                if (var_index == 0)
+                {
+                    value.append(PyEntity(flecs::entity(world, source)));
+                } else
+                {
+                    PyEntity py_entity(flecs::entity(world, ecs_iter_get_var(&it, var_index)));
+                    value.append(py_entity);
+                    z++;
+                }
             }
             
             // Process each query term
@@ -1076,6 +1089,58 @@ public:
         return PyEntity(world.entity());
     }
 
+    PyEntity entity(const std::string& name) {
+        return PyEntity(world.entity(name.c_str()));
+    }
+
+    PyEntity entity(const std::string& name, const py::list& components_and_tags) {
+        PyEntity entity = PyEntity(world.entity(name.c_str()));
+
+        for (auto item : components_and_tags) {
+            try {
+                py::object item_obj = item.cast<py::object>();
+                
+                if (py::isinstance<py::str>(item_obj)) {
+                    std::string tag_name = py::str(item_obj);
+                    entity.add_tag(tag_name);
+                }
+                else {
+                    entity.set_component_instance(item_obj);
+                }
+            } catch (const std::exception& e) {
+                py::print("Error processing component/tag:", e.what());
+            }
+        }
+        
+        return entity;
+    }
+
+    PyEntity prefab(const std::string& name) {
+        return PyEntity(world.prefab(name.c_str()));
+    }
+
+    PyEntity prefab(const std::string& name, const py::list& components_and_tags) {
+        PyEntity prefab = PyEntity(world.prefab(name.c_str()));
+
+        for (auto item : components_and_tags) {
+            try {
+                py::object item_obj = item.cast<py::object>();
+                
+                if (py::isinstance<py::str>(item_obj)) {
+                    std::string tag_name = py::str(item_obj);
+                    prefab.add_tag(tag_name);
+                }
+                else {
+                    prefab.set_component_instance(item_obj);
+                }
+            } catch (const std::exception& e) {
+                py::print("Error processing component/tag:", e.what());
+            }
+        }
+        
+        return prefab;
+    }
+
     ~PyWorld() {
         observer_callbacks.clear();
         system_callbacks.clear();
@@ -1270,38 +1335,6 @@ public:
             return callback;
         });
     }
-
-    PyEntity entity(const std::string& name, const py::list& components_and_tags) {
-        PyEntity entity = PyEntity(world.entity(name.c_str()));
-        
-        // Process each item in the list
-        for (auto item : components_and_tags) {
-            try {
-                // Cast handle to object
-                py::object item_obj = item.cast<py::object>();
-                
-                // Check if it's a string (tag)
-                if (py::isinstance<py::str>(item_obj)) {
-                    std::string tag_name = py::str(item_obj);
-                    entity.add_tag(tag_name);
-                }
-                // Otherwise, treat it as a component instance
-                else {
-                    entity.set_component_instance(item_obj);
-                }
-            } catch (const std::exception& e) {
-                // Handle any errors during processing
-                py::print("Error processing component/tag:", e.what());
-            }
-        }
-        
-        return entity;
-    }
-    
-    // Create named entity
-    PyEntity entity(const std::string& name) {
-        return PyEntity(world.entity(name.c_str()));
-    }
     
     // Lookup entity by name
     PyEntity lookup(const std::string& name) {
@@ -1380,6 +1413,8 @@ PYBIND11_MODULE(_core, m) {
     m.attr("OnAdd") = EcsOnAdd;
     m.attr("OnRemove") = EcsOnRemove;
     m.attr("OnSet") = EcsOnSet;
+    m.attr("OnInstantiate") = EcsOnInstantiate;
+    m.attr("OnInherit") = EcsInherit;
     
     py::class_<PyEntity>(m, "Entity")
         .def("id", &PyEntity::id)
@@ -1403,6 +1438,7 @@ PYBIND11_MODULE(_core, m) {
         .def("add", py::overload_cast<py::object, const std::string&>(&PyEntity::add))
         .def("add", py::overload_cast<py::object, py::object>(&PyEntity::add))
 
+        .def("is_a", (&PyEntity::is_a))
         .def("child_of", (&PyEntity::child_of))
         // Overloaded has methods
         .def("has", py::overload_cast<const std::string&>(&PyEntity::has))
@@ -1443,6 +1479,8 @@ PYBIND11_MODULE(_core, m) {
         .def("entity", py::overload_cast<>(&PyWorld::entity))
         .def("entity", py::overload_cast<const std::string&>(&PyWorld::entity))
         .def("entity", py::overload_cast<const std::string&, const py::list&>(&PyWorld::entity))
+        .def("prefab", py::overload_cast<const std::string&>(&PyWorld::prefab))
+        .def("prefab", py::overload_cast<const std::string&, const py::list&>(&PyWorld::prefab))
         .def("lookup", &PyWorld::lookup)
         .def("progress", &PyWorld::progress, py::arg("delta_time") = 0.0f)
         .def("info", &PyWorld::info)
