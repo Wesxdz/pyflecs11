@@ -7,11 +7,24 @@
 #include <set>
 #include <unordered_map>
 #include <typeindex> // For std::type_index
+#include <pybind11/numpy.h>
 
 #define STRINGIFY(x) #x
 #define MACRO_STRINGIFY(x) STRINGIFY(x)
 
 namespace py = pybind11;
+
+struct GraphExportData {
+    std::vector<int64_t> node_ids;
+    std::vector<std::string> node_names;
+    std::vector<int64_t> edge_sources;
+    std::vector<int64_t> edge_targets;
+    std::vector<int64_t> edge_relations;
+    std::vector<std::string> relation_names;
+    std::map<int64_t, int> id_to_index;
+};
+
+// These fields will eventually be refactored to PyWorld: for now just use one world!...
 
 // Each (non-tag) component on an entity is mapped to a py::object
 // This allows arbitrary Python classes/variables (such as neural networks) as component fields
@@ -78,6 +91,9 @@ public:
         }
         else if (trait_name == "Exclusive") {
             entity.add(flecs::Exclusive);
+        }
+        else if (trait_name == "Inherit") {
+            entity.add(flecs::OnInstantiate, flecs::Inherit);
         }
         else {
             throw std::runtime_error("Unknown trait: " + trait_name);
@@ -1098,6 +1114,15 @@ void PythonSystemIterCallback(ecs_iter_t *it) {
 // Simple wrapper for Flecs world
 class PyWorld {
 public:
+
+    void shutdown_flecs_module() {
+        flecs_component_pyobject.clear();
+        observer_callbacks.clear();
+        system_callbacks.clear();
+        observer_iter_callbacks.clear();
+        system_iter_callbacks.clear();
+    }
+
     flecs::world world;
     
     PyWorld() {
@@ -1213,6 +1238,7 @@ public:
     }
 
     ~PyWorld() {
+        flecs_component_pyobject.clear();
         observer_callbacks.clear();
         system_callbacks.clear();
         observer_iter_callbacks.clear();
@@ -1462,8 +1488,137 @@ public:
         return PyQueryIterator(world, args);
     }
 
-};
+    GraphExportData export_graph_data() {
+        GraphExportData data;
+        
+        // First, collect all entities that participate in relationships
+        std::set<int64_t> entity_ids;
+        std::vector<std::tuple<int64_t, int64_t, int64_t>> raw_edges; // (source, target, relation)
+        
+        // Query all relationships using Flecs query API
+        flecs::query<> query = world.query_builder<>()
+            .with("$r").second(flecs::Wildcard)
+            .without(flecs::ChildOf, "flecs").self().up()
+            .build();
 
+        query.each([&](flecs::iter& it, size_t index) {
+            flecs::entity src = it.entity(index);
+            flecs::entity tgt = it.pair(0).second();
+            flecs::entity rel = it.pair(0).first();
+
+            // Skip system entities (you may want to adjust this threshold)
+            if (src.id() <= 530 || tgt.id() <= 530) {
+                return;
+            }
+
+            entity_ids.insert(src.id());
+            entity_ids.insert(tgt.id());
+            
+            raw_edges.push_back(std::make_tuple(src.id(), tgt.id(), rel.id()));
+        });
+        
+        // Create node mapping
+        int index = 0;
+        for (int64_t entity_id : entity_ids) {
+            data.id_to_index[entity_id] = index++;
+            data.node_ids.push_back(entity_id);
+            
+            // Get entity name
+            flecs::entity entity = world.entity(entity_id);
+            const char* name = entity.name();
+            data.node_names.push_back(name ? std::string(name) : std::to_string(entity_id));
+        }
+        
+        // Convert edges to use indices
+        for (const auto& [src_id, tgt_id, rel_id] : raw_edges) {
+            data.edge_sources.push_back(data.id_to_index[src_id]);
+            data.edge_targets.push_back(data.id_to_index[tgt_id]);
+            data.edge_relations.push_back(rel_id);
+            
+            // Get relation name
+            flecs::entity relation = world.entity(rel_id);
+            const char* rel_name = relation.name();
+            data.relation_names.push_back(rel_name ? std::string(rel_name) : std::to_string(rel_id));
+        }
+        
+        return data;
+    }
+
+    // Export as numpy arrays
+    py::dict export_graph_numpy() {
+        GraphExportData data = export_graph_data();
+        
+        py::dict result;
+        
+        if (data.node_ids.empty()) {
+            // Return empty arrays
+            result["node_ids"] = py::array_t<int64_t>(0);
+            result["node_names"] = py::list();
+            result["edge_index"] = py::array_t<int64_t>(std::vector<py::ssize_t>{2, 0});
+            result["edge_relations"] = py::array_t<int64_t>(0);
+            result["relation_names"] = py::list();
+            result["num_nodes"] = 0;
+            result["num_edges"] = 0;
+            return result;
+        }
+        
+        // Create numpy arrays
+        result["node_ids"] = py::array_t<int64_t>(
+            data.node_ids.size(),
+            data.node_ids.data()
+        );
+        
+        // Convert node names to Python list
+        py::list node_names_list;
+        for (const std::string& name : data.node_names) {
+            node_names_list.append(name);
+        }
+        result["node_names"] = node_names_list;
+        
+        if (!data.edge_sources.empty()) {
+            // Create edge_index as 2xN array
+            std::vector<int64_t> edge_index_flat;
+            edge_index_flat.reserve(data.edge_sources.size() * 2);
+            
+            // First row: sources
+            for (int64_t src : data.edge_sources) {
+                edge_index_flat.push_back(src);
+            }
+            // Second row: targets  
+            for (int64_t tgt : data.edge_targets) {
+                edge_index_flat.push_back(tgt);
+            }
+            
+            result["edge_index"] = py::array_t<int64_t>(
+                std::vector<py::ssize_t>{2, static_cast<py::ssize_t>(data.edge_sources.size())},
+                edge_index_flat.data()
+            );
+            
+            result["edge_relations"] = py::array_t<int64_t>(
+                data.edge_relations.size(),
+                data.edge_relations.data()
+            );
+            
+            // Convert relation names to Python list
+            py::list relation_names_list;
+            for (const std::string& name : data.relation_names) {
+                relation_names_list.append(name);
+            }
+            result["relation_names"] = relation_names_list;
+        } else {
+            // Empty edge arrays
+            result["edge_index"] = py::array_t<int64_t>(std::vector<py::ssize_t>{2, 0});
+            result["edge_relations"] = py::array_t<int64_t>(0);
+            result["relation_names"] = py::list();
+        }
+        
+        result["num_nodes"] = static_cast<int>(data.node_ids.size());
+        result["num_edges"] = static_cast<int>(data.edge_sources.size());
+        
+        return result;
+    }
+
+};
 
 PYBIND11_MODULE(_core, m) {
     m.doc() = R"pbdoc(
@@ -1484,8 +1639,8 @@ PYBIND11_MODULE(_core, m) {
     m.attr("OnAdd") = EcsOnAdd;
     m.attr("OnRemove") = EcsOnRemove;
     m.attr("OnSet") = EcsOnSet;
-    m.attr("OnInstantiate") = EcsOnInstantiate;
-    m.attr("OnInherit") = EcsInherit;
+    m.attr("OnInstantiate") = flecs::OnInstantiate;
+    m.attr("Inherit") = flecs::Inherit;
     m.attr("Transitive") = flecs::Transitive;
     
     py::class_<PyEntity>(m, "Entity")
@@ -1549,6 +1704,7 @@ PYBIND11_MODULE(_core, m) {
     // Bind PyWorld class
     py::class_<PyWorld>(m, "World")
         .def(py::init<>())
+        .def("shutdown", &PyWorld::shutdown_flecs_module, "Explicitly shut down the flecs module and clear Python object references.")
         .def("entity", py::overload_cast<>(&PyWorld::entity))
         .def("entity", py::overload_cast<const std::string&>(&PyWorld::entity))
         .def("entity", py::overload_cast<const std::string&, const py::list&>(&PyWorld::entity))
@@ -1565,6 +1721,8 @@ PYBIND11_MODULE(_core, m) {
         .def("system", &PyWorld::system_decorator)
         .def("observer_iter", &PyWorld::observer_iter_decorator, py::arg("events") = py::list())
         .def("system_iter", &PyWorld::system_iter_decorator)
+        .def("export_graph_numpy", &PyWorld::export_graph_numpy, 
+     "Export graph structure as numpy arrays in a dictionary")
         .def("__repr__", [](const PyWorld& w) {
             return w.info();
         });

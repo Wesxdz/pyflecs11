@@ -4,7 +4,7 @@ from dataclasses import dataclass
 def main():
    ecs = flecs.World()
    at = "LocatedIn"
-   ecs.component("LocatedIn").add_trait("Transitive")
+   ecs.component(at).add_trait("Transitive")
    
    earth = ecs.entity("Earth", ["Planet"])
    

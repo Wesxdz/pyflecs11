@@ -26,7 +26,7 @@ def main():
 
     for person, food, place in ecs.query(
         ("Eats", "$food"), 
-        ("$food", "Healthy"), 
+        ("$food", "Healthy"),
         ("$food", "GrowsIn", "$place"),
         ("$place", "Africa")
         ):
