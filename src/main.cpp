@@ -585,6 +585,10 @@ private:
         ecs_entity_t relation_id = 0;
         ecs_entity_t target_id = 0;
         bool is_tag = false;
+        
+        // Operator support
+        ecs_oper_kind_t oper = EcsAnd;  // Default operator
+        ecs_inout_kind_t inout = EcsInOutDefault;  // Default inout
     };
     
     std::vector<QueryTerm> query_terms;
@@ -617,12 +621,60 @@ private:
         }
     }
     
+    // Helper function to parse string with operator prefix
+    std::pair<std::string, ecs_oper_kind_t> parse_operator_prefix(const std::string& str) {
+        if (str.empty()) {
+            return {str, EcsAnd};
+        }
+        
+        // Check for ! prefix (negation)
+        if (str[0] == '!') {
+            return {str.substr(1), EcsNot};
+        }
+        
+        // Check for ? prefix (optional)
+        if (str[0] == '?') {
+            return {str.substr(1), EcsOptional};
+        }
+        
+        // Default is And
+        return {str, EcsAnd};
+    }
+    
+    // Helper function to handle 'not' keyword wrapper
+    bool handle_not_operator(py::object& comp_type, QueryTerm& term) {
+        // Check if this is a 'not' operation by examining the type
+        std::string type_name = py::str(py::type::of(comp_type).attr("__name__"));
+        
+        if (type_name == "NotType" || 
+            (py::hasattr(comp_type, "__class__") && 
+             std::string(py::str(comp_type.attr("__class__").attr("__name__"))) == "NotType")) {
+            
+            // This is a 'not' wrapped object
+            term.oper = EcsNot;
+            
+            // Extract the actual component/tag from the 'not' wrapper
+            if (py::hasattr(comp_type, "component")) {
+                comp_type = comp_type.attr("component");
+                return true;
+            } else if (py::hasattr(comp_type, "__args__") && py::len(comp_type.attr("__args__")) > 0) {
+                comp_type = comp_type.attr("__args__")[0];
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
 public:
     PyQueryIterator(flecs::world& w, py::args args) : world(w) {
         // Parse query arguments
         for (auto arg : args) {
             QueryTerm term;
             py::object comp_type = arg.cast<py::object>();
+            
+            // Check for 'not' keyword wrapper first
+            handle_not_operator(comp_type, term);
             
             // Check if this is a tuple (relationship pair)
             if (py::isinstance<py::tuple>(comp_type)) {
@@ -636,15 +688,19 @@ public:
                     py::object relation = rel_pair[0];
                     if (py::isinstance<py::str>(relation)) {
                         std::string rel_name = relation.cast<std::string>();
+                        auto [parsed_name, oper] = parse_operator_prefix(rel_name);
+                        if (term.oper == EcsAnd) { // Only override if not already set by 'not' wrapper
+                            term.oper = oper;
+                        }
+                        rel_name = parsed_name;
+                        
                         if (rel_name == "*") {
                             term.is_wildcard_relation = true;
                             term.relation_id = EcsWildcard;
-                        } else if (is_variable(rel_name))
-                        {
+                        } else if (is_variable(rel_name)) {
                             term.is_variable_source = true;
                             term.src_name = rel_name;
-                        }   
-                        else {
+                        } else {
                             term.relation_id = world.entity(rel_name.c_str()).id();
                         }
                     } else if (py::isinstance<PyEntity>(relation)) {
@@ -661,16 +717,16 @@ public:
                     py::object target = rel_pair[1];
                     if (py::isinstance<py::str>(target)) {
                         std::string tgt_name = target.cast<std::string>();
+                        auto [parsed_name, oper] = parse_operator_prefix(tgt_name);
+                        tgt_name = parsed_name;
+                        
                         if (tgt_name == "*") {
                             term.is_wildcard_target = true;
                             term.target_id = EcsWildcard;
-                        } 
-                        else if (is_variable(tgt_name))
-                        {
+                        } else if (is_variable(tgt_name)) {
                             term.is_variable_target = true;
                             term.second_name = tgt_name;
-                        } 
-                        else {
+                        } else {
                             term.target_id = world.entity(tgt_name.c_str()).id();
                         }
                     } else if (py::isinstance<PyEntity>(target)) {
@@ -709,15 +765,19 @@ public:
                     py::object relation = rel_pair[1];
                     if (py::isinstance<py::str>(relation)) {
                         std::string rel_name = relation.cast<std::string>();
+                        auto [parsed_name, oper] = parse_operator_prefix(rel_name);
+                        if (term.oper == EcsAnd) { // Only override if not already set by 'not' wrapper
+                            term.oper = oper;
+                        }
+                        rel_name = parsed_name;
+                        
                         if (rel_name == "*") {
                             term.is_wildcard_relation = true;
                             term.relation_id = EcsWildcard;
-                        } else if (is_variable(rel_name))
-                        {
+                        } else if (is_variable(rel_name)) {
                             term.is_variable_relation = true;
                             term.first_name = rel_name;
-                        }   
-                        else {
+                        } else {
                             term.relation_id = world.entity(rel_name.c_str()).id();
                         }
                     } else if (py::isinstance<PyEntity>(relation)) {
@@ -734,16 +794,16 @@ public:
                     py::object target = rel_pair[2];
                     if (py::isinstance<py::str>(target)) {
                         std::string tgt_name = target.cast<std::string>();
+                        auto [parsed_name, oper] = parse_operator_prefix(tgt_name);
+                        tgt_name = parsed_name;
+                        
                         if (tgt_name == "*") {
                             term.is_wildcard_target = true;
                             term.target_id = EcsWildcard;
-                        } 
-                        else if (is_variable(tgt_name))
-                        {
+                        } else if (is_variable(tgt_name)) {
                             term.is_variable_target = true;
                             term.second_name = tgt_name;
-                        } 
-                        else {
+                        } else {
                             term.target_id = world.entity(tgt_name.c_str()).id();
                         }
                     } else if (py::isinstance<PyEntity>(target)) {
@@ -766,8 +826,14 @@ public:
             } else {
                 // Regular component or tag
                 if (py::isinstance<py::str>(comp_type)) {
-                    // Tag
+                    // Tag with potential operator prefix
                     std::string component_name = comp_type.cast<std::string>();
+                    auto [parsed_name, oper] = parse_operator_prefix(component_name);
+                    if (term.oper == EcsAnd) { // Only override if not already set by 'not' wrapper
+                        term.oper = oper;
+                    }
+                    component_name = parsed_name;
+                    
                     term.id = world.entity(component_name.c_str()).id();
                     term.is_tag = true;
                 } else {
@@ -779,42 +845,33 @@ public:
                 }
             }
 
-            if (term.is_variable_target && !term.is_variable_source)
-            {
-                if (!var_set.count("$this"))
-                {
+            // Variable handling (existing logic)
+            if (term.is_variable_target && !term.is_variable_source) {
+                if (!var_set.count("$this")) {
                     var_set.insert("$this");
                     var_names.push_back("this");
                 }
             }
-            if (term.is_variable_source)
-            {
-                if (!var_set.count(term.src_name))
-                {
+            if (term.is_variable_source) {
+                if (!var_set.count(term.src_name)) {
                     var_set.insert(term.src_name);
                     var_names.push_back(term.src_name.substr(1));
                 }
             }
-            if (term.is_variable_relation)
-            {
-                if (!var_set.count(term.first_name))
-                {
+            if (term.is_variable_relation) {
+                if (!var_set.count(term.first_name)) {
                     var_set.insert(term.first_name);
                     var_names.push_back(term.first_name.substr(1));
                 }
             }
-            if (term.is_variable_target)
-            {
-                if (!var_set.count(term.second_name))
-                {
+            if (term.is_variable_target) {
+                if (!var_set.count(term.second_name)) {
                     var_set.insert(term.second_name);
                     var_names.push_back(term.second_name.substr(1));
                 }
             } 
-            if (!term.is_variable_source && !term.is_variable_relation && !term.is_variable_target)
-            {
-                if (!var_set.count("$this"))
-                {
+            if (!term.is_variable_source && !term.is_variable_relation && !term.is_variable_target) {
+                if (!var_set.count("$this")) {
                     var_set.insert("$this");
                     var_names.push_back("this");
                 }
@@ -822,37 +879,33 @@ public:
             
             query_terms.push_back(term);
         }
+        
+        // Build query descriptor with operator support
         ecs_query_desc_t desc = {};
         for (size_t i = 0; i < query_terms.size() && i < 32; ++i) {
-            if (query_terms[i].is_variable_source && query_terms[i].is_variable_target)
-            {
+            // Set the operator
+            desc.terms[i].oper = query_terms[i].oper;
+            desc.terms[i].inout = query_terms[i].inout;
+            
+            if (query_terms[i].is_variable_source && query_terms[i].is_variable_target) {
                 desc.terms[i].src.name = query_terms[i].src_name.c_str();
                 desc.terms[i].first.id = query_terms[i].relation_id;
                 desc.terms[i].second.name = query_terms[i].second_name.c_str();
-            }
-            else if (query_terms[i].is_variable_source)
-            {
+            } else if (query_terms[i].is_variable_source) {
                 desc.terms[i].first.id = query_terms[i].target_id;
                 desc.terms[i].src.name = query_terms[i].src_name.c_str();
-            }
-            else if (query_terms[i].is_variable_target)
-            {
+            } else if (query_terms[i].is_variable_target) {
                 desc.terms[i].first.id = query_terms[i].relation_id;
                 desc.terms[i].second.name = query_terms[i].second_name.c_str();
-            }
-            else if (query_terms[i].is_variable_relation)
-            {
+            } else if (query_terms[i].is_variable_relation) {
                 desc.terms[i].first.name = query_terms[i].first_name.c_str();
-                // desc.terms[i].first.name = query_terms[i].second_name.c_str();
-            } else
-            {
+            } else {
                 desc.terms[i].id = query_terms[i].id;
             }
         }
         
         query = ecs_query_init(world, &desc);
-        for (std::string var_name : var_names)
-        {
+        for (std::string var_name : var_names) {
             var_indices.push_back(ecs_query_find_var(query, var_name.c_str()));
         }
         it = ecs_query_iter(world, query);
